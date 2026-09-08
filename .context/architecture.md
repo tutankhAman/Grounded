@@ -19,9 +19,9 @@ The brief explicitly rewards a small, understandable system over a large, unclea
    PDF upload  ───► │  Ingestion API   │
                     └────────┬─────────┘
                              ▼
-                    ┌─────────────────┐
-                    │  Parser/Chunker  │  (pdfjs-dist, text + position; table pages → image)
-                    └────────┬─────────┘
+                     ┌─────────────────┐
+                     │  Parser/Chunker  │  (pdfjs-dist, page-by-page lazy stream; text + position; table pages → image)
+                     └────────┬─────────┘
                              ▼
                     ┌─────────────────┐
                     │ Fact Extractor   │  (LLM, structured output per chunk)
@@ -53,6 +53,14 @@ The brief explicitly rewards a small, understandable system over a large, unclea
 
 Job queue (BullMQ + Redis) sits between ingestion and the extractor/matcher so large PDFs and multi-PDF
 batches don't block the API, and so a new upload only triggers work for that document, not a full rebuild.
+
+Streaming policy: PDF upload streams to disk (`Bun.write(path, file.stream())`, constant memory).
+Page extraction is a lazy page-by-page stream — `getPage(i)` → extract → persist `page_chunks` →
+`page.cleanup()` → publish per-page progress over the WebSocket status channel, never accumulating
+all pages in memory. Source bytes stay resident (PDF xref trailer lives at EOF, so `getDocument`
+holds the file); laziness is processing-level, not I/O-level. LLM fact extraction stays bulk
+per-chunk `generateObject` — token streaming is rejected because schema validation and quote
+verification need the complete chunk and complete quote.
 
 ## 2. Tech Stack
 
@@ -145,17 +153,34 @@ silently fork into three types unless the document actually distinguishes them.
 ## 4. Pipeline Stages
 
 ### 4.1 Ingestion and parsing
-- Extract text per page with position data via `pdfjs-dist`. Chunk by page or logical section, not
-  fixed token windows, so evidence spans stay meaningful and map cleanly to what the frontend viewer
-  highlights.
+- Stream the upload to disk, never buffer the whole PDF in the API process. Page extraction is a
+  lazy sequential stream: `for (i = 1..numPages)` → `getPage(i)` → `getTextContent()` → insert the
+  `page_chunks` row immediately → `page.cleanup()` → `redis.publish(doc:status, {current, total})`.
+  Memory stays O(1 page). Never `Promise.all()` pages. Upsert on
+  `(documentId, pageNumber, chunkIndex)` so a crashed job resumes without duplicates; wrap each
+  page in try/catch so one bad page emits a `pipeline_events` warning and continues instead of
+  failing the document. Chunk by page or logical section, not fixed token windows, so evidence
+  spans stay meaningful and map cleanly to what the frontend viewer highlights.
 - Detect table-heavy pages (density of numeric tokens and short lines is a cheap enough heuristic) and
-  route those to Gemini as a rendered page image instead of parsed text. LLMs mis-read merged cells and
-  multi-row headers from raw text more than they misread a table they can actually see.
+  route those to Gemini as a rendered page image instead of parsed text. Also render low-text pages
+  (`rawText.length < ~1000` chars or text-item count < N — e.g. earnings-deck chart slides where the
+  figures live in vector graphics, not extractable text): the numeric-density heuristic never fires
+  there, so without this fallback those pages would go down the text path with almost nothing.
+  Render vision pages only, at 2x, then immediately release canvas memory (`page.cleanup()`, zero
+  the canvas, drop refs). Quote validation is skipped for vision-only facts with no source text
+  (flagged, not silently dropped).
+  LLMs mis-read merged cells and multi-row headers from raw text more than they misread a table
+  they can actually see. Store trimmed run fields (`str`, x, y, width, height) in `position_data`,
+  not raw pdfjs objects.
+- `sourcePage` is the PDF page index (1-based position in the file) — it drives the evidence viewer.
+  The starter excerpts retain non-contiguous originals, so printed page numbers jump; capture any
+  printed label the model reads in `qualifiers.printedPage` and never conflate it with `sourcePage`.
 
 ### 4.2 Fact extraction
 - Define a Zod schema (entity, predicate, value, unit, time_scope, qualifiers, verbatim quote,
   self-reported confidence) and call it through the Vercel AI SDK's `generateObject`, on Groq for text
-  chunks and Gemini vision for table-page images, so both paths return the same shape.
+  chunks and Gemini vision for table-page images, so both paths return the same shape. No token
+  streaming: structured output plus the verbatim-quote check require the complete object.
 - Confirm the specific Gemini model in use actually supports structured output with tool calling before
   relying on it, this is inconsistent across Gemini versions, and keep a parse-and-validate fallback for
   when it fails rather than assuming the schema constraint always holds.
@@ -192,8 +217,8 @@ Two-stage, cheap-first:
 ## 5. API Surface
 
 ```
-POST   /documents                 upload a PDF, kicks off async processing
-WS     /documents/:id/status      live processing status, pushed not polled
+POST   /documents                 upload a PDF (streamed to disk), kicks off async processing
+WS     /documents/:id/status      live per-page processing status ({status, progress.current/total}), pushed not polled
 GET    /facts?entity=&predicate=  browse/filter facts
 GET    /facts/:id                 fact detail with evidence span
 GET    /facts/:id/relationships   corroborations/contradictions for this fact

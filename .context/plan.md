@@ -178,11 +178,11 @@ app.get('/health', async ({ db, redis }) => {
 app.post('/documents', async ({ body, db, queue }) => {
   const { file } = body;                  // Elysia parses multipart automatically
   const filename = file.name;
-  const bytes = await file.arrayBuffer();
 
-  // Write to disk — keep raw bytes, don't trust pdfjs to work from a Buffer in all versions
+  // Stream to disk — never buffer the whole PDF via arrayBuffer(), large PDFs would
+  // OOM the API process that also serves WS status.
   const filePath = path.join(process.env.UPLOAD_DIR, `${crypto.randomUUID()}.pdf`);
-  await Bun.write(filePath, bytes);
+  await Bun.write(filePath, file.stream());   // constant memory; clean up partial file on throw
 
   const [doc] = await db.insert(documents).values({
     filename,
@@ -200,10 +200,14 @@ app.post('/documents', async ({ body, db, queue }) => {
 ```
 
 Return immediately after enqueuing. Never await the parse job from the HTTP handler.
+Enforce a max upload size and delete the partial file if the stream throws.
 
 ### Parser module (`pipeline/parser.ts`)
 
 Uses `pdfjs-dist` in a Node/Bun worker context (no canvas required for text extraction).
+Parsing is a lazy sequential stream: one page in memory at a time, persisted immediately.
+`getDocument` still holds the source bytes (PDF xref trailer lives at EOF), so laziness is
+processing-level, not I/O-level. Never `Promise.all()` pages.
 
 ```typescript
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -224,17 +228,53 @@ export interface PageChunk {
 }
 ```
 
-**Per-page extraction**: iterate `page.getTextContent()`, collect each item's `str`, `transform[4]`
-(x), `transform[5]` (y), `width`, `height`. Group into `TextRun[]` per page.
+**Per-page extraction**: iterate pages sequentially with `getPage(i)`, collect each item's `str`,
+`transform[4]` (x), `transform[5]` (y), `width`, `height` from `getTextContent()`. Group into
+`TextRun[]` for that page only, persist the `page_chunks` row immediately, then call
+`page.cleanup()` before advancing. Wrap each page in try/catch: on failure emit a
+`pipeline_events` warning with `{ pageNumber }` and continue instead of failing the document.
+Upsert on `(document_id, page_number, chunk_index)` so a crashed job resumes without duplicates.
+Store only trimmed run fields (`text`, x, y, width, height, `fontName`) in `position_data`,
+not raw pdfjs item objects.
+
+```typescript
+export async function* streamPages(documentId: string, filePath: string): AsyncGenerator<PageChunk> {
+  const data = new Uint8Array(await Bun.file(filePath).arrayBuffer()); // source bytes stay resident
+  const pdf = await pdfjs.getDocument({ data }).promise;
+  try {
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      try {
+        yield await extractPage(documentId, page, i);   // text + heuristic + optional render
+      } finally {
+        page.cleanup();
+      }
+    }
+  } finally {
+    await pdf.destroy();
+  }
+}
+// Consumer: for await (const chunk of streamPages(...)) { persist; publish progress; enqueue extract }
+```
 
 **Table-heavy heuristic**: a page is flagged if:
 - More than 40% of its text items are purely numeric (regex `/^[\d,.$%\-]+$/`), **and**
 - The average text-item width is less than 25% of page width (short columns)
 
-Tune these thresholds after running against your actual starter PDFs, not before.
+**Low-text / chart-slide fallback**: a page is also flagged for vision rendering if `rawText.length < ~1000`
+chars or text-item count < N (tune N against the earnings deck — sampled slides run 479–1287 chars vs
+3000–8000 for report pages). Chart slides keep figures in vector graphics with almost no extractable
+text, so the numeric-density heuristic never fires there; without this fallback they would go down the
+text path with nothing to extract. Vision-flagged pages set `imagePath`; quote validation is skipped
+for vision-only facts with no source text (flagged via `sourceQuoteValid = false`, not dropped).
 
-**Image rendering for table pages**: use `pdfjs-dist`'s canvas API. In Bun this requires the
-`canvas` npm package. Render at 2x device pixel ratio so table text is legible for the vision model:
+Tune all three thresholds against the starter PDFs (Delhivery + India-macroeconomy excerpts), not before.
+
+**Image rendering for table pages**: use `pdfjs-dist`'s canvas API for vision-flagged pages only
+(table-heavy OR low-text/chart-slide fallback).
+In Bun this requires the `canvas` npm package — test rendering before writing the rest of Phase 1.
+Render at 2x device pixel ratio so table text is legible for the vision model, persist the image,
+then immediately release memory (zero the canvas, drop refs, `page.cleanup()`):
 
 ```typescript
 import { createCanvas } from 'canvas';
@@ -242,9 +282,14 @@ import { createCanvas } from 'canvas';
 async function renderPageToDataUrl(page: PDFPageProxy, scale = 2): Promise<string> {
   const viewport = page.getViewport({ scale });
   const canvas = createCanvas(viewport.width, viewport.height);
-  const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  return canvas.toDataURL('image/png');
+  try {
+    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return canvas.toDataURL('image/png');
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
 }
 ```
 
@@ -254,32 +299,39 @@ single page exceeds ~6000 tokens (uncommon), split on paragraph gaps (runs with 
 1.5× median line height) and emit multiple chunks for that page, each tagged with `{ pageNumber,
 chunkIndex }`.
 
-**Persistence**: after parsing, insert rows into a `page_chunks` table (not in the schema yet —
-add it):
+**Persistence**: insert each `page_chunks` row as its page is parsed (inside the stream loop),
+not batched at the end — this is what keeps memory O(1 page) and makes progress reporting honest:
 
 ```sql
 page_chunks(
-  id, document_id, page_number, chunk_index,
+  id, document_id, page_number, chunk_index,   -- page_number = PDF index (1-based position in file), drives the viewer
   raw_text, is_table_heavy,
-  image_path,       -- null unless table-heavy
+  image_path,       -- null unless vision-flagged (table-heavy or low-text fallback)
   position_data jsonb,  -- array of TextRun objects, kept for frontend highlight mapping
   token_estimate int,
   created_at
 )
 ```
 
+**Printed vs PDF page numbers**: the starter excerpts retain non-contiguous originals, so numbers
+printed on the page jump (e.g. 1, 4, 26–37…). `page_number`/`sourcePage` always mean PDF index.
+If the extractor reads a printed number in-text, store it as `qualifiers.printedPage` — never
+overwrite `sourcePage` with it. Note the jump in the README/demo so reviewers aren't confused.
+
 Store `position_data` as JSONB now. The frontend PDF viewer reads it back to draw highlight
 overlays later. Do not reconstruct position data from `pdfjs-dist` a second time on the frontend.
 
 **Status updates**: update `documents.status` to `'parsing'` when the job starts, `'parsed'` when
-done, `'failed'` with an error message on exception. Emit a WebSocket message on each transition
-(see Phase 5).
+done, `'failed'` with an error message on exception. Publish per-page progress to
+`doc:${documentId}:status` inside the stream loop (`{ status: 'parsing', progress: { current: i,
+total: numPages } }`), fire-and-forget — never await WS delivery from the worker. The API
+forwards these over the WebSocket (see Phase 5).
 
 ### Exit criteria
 
 1. Upload any PDF via `POST /documents`.
 2. A debug endpoint (`GET /documents/:id/chunks`) returns page-level chunks.
-3. Table-heavy pages include a rendered image path; text-only pages do not.
+3. Table-heavy AND low-text/chart-slide pages include a rendered image path; dense text-only pages do not.
 4. Position data in `page_chunks.position_data` contains real x/y/width/height, not zeros.
 5. `documents.status` is `'parsed'` on completion.
 
@@ -403,6 +455,8 @@ function validateQuote(fact: ExtractedFact, sourceText: string): boolean {
 If this fails: set `fact.confidence *= 0.5` and tag it with `{ quoteMismatch: true }` in
 `qualifiers`. Do not silently drop it — a flagged, lower-confidence fact is more useful than a
 silently discarded one, and it becomes a candidate for the Phase 8 failure case.
+Vision-only facts from low-text/chart-slide pages have no source text to match against: skip the
+string check, keep `sourceQuoteValid = false` with `{ visionOnly: true }`, and keep the fact.
 
 ### Embedding
 
@@ -691,18 +745,20 @@ app.ws('/documents/:id/status', {
 
 ### WebSocket status updates
 
-The worker publishes status transitions to a Redis pub/sub channel:
+The worker publishes per-page progress plus stage transitions to a Redis pub/sub channel,
+fire-and-forget (never await WS delivery from the worker):
 ```typescript
 await redis.publish(`doc:${documentId}:status`, JSON.stringify({
   status: 'parsing' | 'parsed' | 'extracting' | 'extracted' | 'resolving' | 'reconciling' | 'done' | 'failed',
-  progress: { current: 3, total: 10 },   // pages processed
+  progress: { current: 3, total: 10 },   // pages processed — updated per page inside the parse/extract loops
   error?: string,
 }));
 ```
 
 The API WebSocket handler subscribes to that channel and forwards messages to the client.
 This means the API process needs a dedicated Redis subscriber client (not the same connection
-used for BullMQ).
+used for BullMQ). The frontend draws its progress bar from these per-page messages and
+invalidates TanStack Query's `['facts']`/`['documents']` keys only on `status = 'done'`.
 
 ### Spot-check and precision logging
 
@@ -862,6 +918,7 @@ interface PipelineEvent {
 
 Emit a warning event for:
 - `sourceQuoteValid = false` — quote hallucinated or mis-copied
+- Per-page parse failure (`stage = 'parse'`, with `{ pageNumber, error }`) — page skipped, document continues
 - Entity resolution confirmed "NO" by LLM after embedding distance suggested a match
 - `generateObject` falling back to manual parse
 - A relationship assigned `relationType = 'uncertain'`
@@ -906,7 +963,8 @@ sources). Run it through the pipeline. Record:
 - Time per chunk in the extraction stage (note: this is mostly LLM API latency)
 - Memory high-water mark of the worker process (`process.memoryUsage().heapUsed`)
 
-Expected bottleneck: LLM API calls. If extraction is too slow, add concurrency:
+Expected bottleneck: LLM API calls. Parsing itself stays sequential (one page at a time per
+the lazy stream); extraction gets concurrency. If extraction is too slow, add concurrency:
 
 ```typescript
 // Process chunks in batches of 5 concurrently, not one at a time
@@ -1041,7 +1099,7 @@ possible examples for each of the four required cases before recording the video
 | Risk | Where it bites | Pre-emption |
 |---|---|---|
 | Gemini structured output not working on a specific model version | Phase 2 | Test structured output before building the extraction path. Have the raw-parse fallback ready from day one. |
-| `pdfjs-dist` in Bun missing canvas bindings | Phase 1 table render | Install `canvas` npm package and test rendering before writing the rest of Phase 1. |
+| `pdfjs-dist` in Bun missing canvas bindings | Phase 1 table render | Install `canvas` npm package and test rendering a single table-heavy page (render → persist → `page.cleanup()` + zero canvas) before writing the rest of Phase 1. |
 | Embedding model changed mid-project | Phases 2–4 | Lock to one model in `EMBEDDING_MODEL` env var. Never mix models in `facts.embedding`. |
 | Entity false-merge corrupts reconciliation | Phase 3 | Don't trust embedding distance alone. The LLM confirmation call is non-optional. |
 | WebSocket Redis subscriber shares connection with BullMQ | Phase 5 | Create a dedicated subscriber client. BullMQ's `IORedis` connection and a pub/sub subscriber must be separate instances. |

@@ -86,7 +86,9 @@ hunt for across a facts table.
 
 Status indicator (pending / processing / processed / failed) matters more than any other detail on this
 screen, it's the honest signal that ingestion is actually async and working, which is worth showing plainly
-rather than hiding behind a spinner.
+rather than hiding behind a spinner. The processing state shows a per-page progress bar driven by the
+WebSocket `doc:<id>:status` messages (`{ status, progress: { current, total } }` published per parsed
+page); TanStack Query's `['facts']`/`['documents']` keys invalidate only when `status = 'done'`.
 
 ### 3.3 Facts
 
