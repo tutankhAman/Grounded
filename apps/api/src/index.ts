@@ -7,6 +7,7 @@ import { Elysia } from "elysia";
 import Redis from "ioredis";
 import { closeQueue } from "./lib/queue";
 import { documentRoutes } from "./routes/documents";
+import { entityRoutes } from "./routes/entities";
 import { factRoutes } from "./routes/facts";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
@@ -66,11 +67,7 @@ export const app = new Elysia()
   }))
   .use(documentRoutes)
   .use(factRoutes)
-  .group("/entities", (group) =>
-    group.get("/", () => ({
-      message: "Entities listing will be implemented in Phase 3 & 5",
-    }))
-  );
+  .use(entityRoutes);
 
 if (import.meta.main) {
   const maxUploadMb = Number(process.env.MAX_UPLOAD_MB) || 100;
