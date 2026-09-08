@@ -8,6 +8,12 @@ Timeline tags:
 - **Should-have** — cheap relative to their value; cut only under real time pressure.
 - **Stretch** — attempt only once everything above is solid and demo'd.
 
+Status tags (Sep 2026):
+- ✅ **BUILT** — Phases 0–2 (scaffolding, ingestion/parsing, batched fact extraction) are implemented
+  as specified below. Treat those sections as the as-built record, not a proposal.
+- ⬅ **NEXT** — Phases 3–4 (entity resolution, matching + reconciliation) are what we execute next.
+  Provider references there are updated to the gateway setup; intent is unchanged.
+
 ---
 
 ## Phase 0 — Scaffolding [Core]
@@ -39,7 +45,7 @@ grounded/
 │   │   │   │   ├── resolve.ts     # Entity resolution job consumer
 │   │   │   │   └── reconcile.ts   # Matching + reconciliation job consumer
 │   │   │   └── pipeline/
-│   │   │       ├── parser.ts      # pdfjs-dist text + position extraction
+│   │   │       ├── parser.ts      # unpdf text + position extraction (Bun-safe pdf.js build)
 │   │   │       ├── extractor.ts   # Vercel AI SDK generateObject calls
 │   │   │       ├── resolver.ts    # Entity resolution logic
 │   │   │       ├── matcher.ts     # pgvector nearest-neighbor fact matching
@@ -129,13 +135,26 @@ before the auto-generated ones.
 ```
 DATABASE_URL=postgresql://grounded:grounded@localhost:5432/grounded
 REDIS_URL=redis://localhost:6379
-GROQ_API_KEY=
+LLM_BASE_URL=                        # OpenAI-compatible gateway endpoint (empty = direct Google)
+LLM_API_KEY=                         # gateway key; GEMINI_API_KEY is the direct fallback
 GEMINI_API_KEY=
+TEXT_MODEL=gemini-3.5-flash-lite
+TEXT_MODEL_FALLBACK=gemini-3.1-flash-lite
+VISION_MODEL=gemini-3.5-flash-lite
+THINKING_BUDGET=0                    # thinking bills as output; zero benefit for extraction
+VISION_ENABLED=1
+SKIP_BOILERPLATE=1
+EXTRACT_CONCURRENCY=6                # downstream of dashboard RPM, never chosen for elegance
+EXTRACT_TARGET_OUTPUT_TOKENS=42000   # pack budget; ~10–18 pages/call, NEVER fixed 50-page batches
+RENDER_SCALE=1.5
+LLM_RPM_BUDGET=60                    # read from gateway dashboard; 12 on direct-Google fallback
 PORT=3000
 UPLOAD_DIR=./uploads
-EMBEDDING_MODEL=gemini-embedding-2        # Google Gemini Embedding 2
-EMBEDDING_DIM=1536                        # Matryoshka Representation Learning (MRL) output dimensionality to stay within pgvector HNSW limits (< 2000)
-FACT_TYPE_SIMILARITY_THRESHOLD=0.85        # cosine similarity above which predicates are considered the same type
+EMBEDDING_MODEL=gemini-embedding-001 # NOT embedding-2: 2 aggregates list inputs into ONE vector
+EMBEDDING_DIM=1536                   # MRL point (~68.2 MTEB); L2-normalize client-side (001 has no auto-renorm)
+EMBEDDING_TASK_DOC=RETRIEVAL_DOCUMENT
+EMBED_DIRECT=0                       # 1 = embeds direct-to-Google if gateway mangles embed params
+FACT_TYPE_SIMILARITY_THRESHOLD=0.85  # cosine similarity above which predicates are considered the same type
 ENTITY_MATCH_THRESHOLD=0.80
 ```
 
@@ -205,15 +224,15 @@ app.post('/documents', async ({ body, db, queue }) => {
 Return immediately after enqueuing. Never await the parse job from the HTTP handler.
 Enforce a max upload size and delete the partial file if the stream throws.
 
-### Parser module (`pipeline/parser.ts`)
+### Parser module (`pipeline/parser.ts`) ✅ BUILT
 
-Uses `pdfjs-dist` in a Node/Bun worker context (no canvas required for text extraction).
+Uses `unpdf` (serverless pdf.js build, Bun-safe) in the worker context (no canvas required for text extraction).
 Parsing is a lazy sequential stream: one page in memory at a time, persisted immediately.
 `getDocument` still holds the source bytes (PDF xref trailer lives at EOF), so laziness is
 processing-level, not I/O-level. Never `Promise.all()` pages.
 
 ```typescript
-import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocumentProxy } from 'unpdf';
 
 export interface TextRun {
   pageNumber: number;
@@ -226,8 +245,9 @@ export interface PageChunk {
   pageNumber: number;
   runs: TextRun[];
   rawText: string;          // concatenated, for LLM input
-  isTableHeavy: boolean;
-  imageDataUrl?: string;    // populated only if isTableHeavy
+  isTableHeavy: boolean;    // recorded; routes to TEXT path (see below), not vision
+  isLowText: boolean;       // routes to vision lane
+  needsVision: boolean;     // = isLowText (single source of truth for the vision gate)
 }
 ```
 
@@ -243,12 +263,12 @@ not raw pdfjs item objects.
 ```typescript
 export async function* streamPages(documentId: string, filePath: string): AsyncGenerator<PageChunk> {
   const data = new Uint8Array(await Bun.file(filePath).arrayBuffer()); // source bytes stay resident
-  const pdf = await pdfjs.getDocument({ data }).promise;
+  const pdf = await getDocumentProxy(data);
   try {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       try {
-        yield await extractPage(documentId, page, i);   // text + heuristic + optional render
+        yield await extractPage(documentId, page, i);   // text + heuristic (render happens in Phase 2)
       } finally {
         page.cleanup();
       }
@@ -260,38 +280,42 @@ export async function* streamPages(documentId: string, filePath: string): AsyncG
 // Consumer: for await (const chunk of streamPages(...)) { persist; publish progress; enqueue extract }
 ```
 
-**Table-heavy heuristic**: a page is flagged if:
+**Table-heavy heuristic** (recorded, routes to the TEXT path — not vision): a page is flagged if:
 - More than 40% of its text items are purely numeric (regex `/^[\d,.$%\-]+$/`), **and**
 - The average text-item width is less than 25% of page width (short columns)
 
-**Low-text / chart-slide fallback**: a page is also flagged for vision rendering if `rawText.length < ~1000`
-chars or text-item count < N (tune N against the earnings deck — sampled slides run 479–1287 chars vs
-3000–8000 for report pages). Chart slides keep figures in vector graphics with almost no extractable
-text, so the numeric-density heuristic never fires there; without this fallback they would go down the
-text path with nothing to extract. Vision-flagged pages set `imagePath`; quote validation is skipped
-for vision-only facts with no source text (flagged via `sourceQuoteValid = false`, not dropped).
+Linearized table text is sufficient for extraction; merged-cell ambiguity is handled downstream by
+confidence penalties + quote flags, and is the most natural honest-failure candidate (Phase 8) —
+spending vision to hide it would cost money and the best failure exhibit. Escalation rule only: a
+table-heavy page yielding zero facts or only sub-0.7-confidence facts gets one vision attempt.
+
+**Low-text / chart-slide gate** (`needsVision = isLowText` — the ONLY vision trigger): a page goes to
+vision if `rawText.length < ~1000` chars or text-item count < N (tune N against the earnings deck —
+sampled slides run 479–1287 chars vs 3000–8000 for report pages). Chart slides keep figures in vector
+graphics with almost no extractable text, so the numeric-density heuristic never fires there; without
+this fallback they would go down the text path with nothing to extract. Vision-flagged pages set
+`imagePath`; vision-only facts persist with `sourceQuoteValid = false` + `{ visionOnly: true }`
+(flagged, never dropped).
 
 Tune all three thresholds against the starter PDFs (Delhivery + India-macroeconomy excerpts), not before.
+Thresholds stay env-overridable and content-agnostic — never per-document branches.
 
-**Image rendering for table pages**: use `pdfjs-dist`'s canvas API for vision-flagged pages only
-(table-heavy OR low-text/chart-slide fallback).
-In Bun this requires the `canvas` npm package — test rendering before writing the rest of Phase 1.
-Render at 2x device pixel ratio so table text is legible for the vision model, persist the image,
-then immediately release memory (zero the canvas, drop refs, `page.cleanup()`):
+**Image rendering (Phase 2 consumer, `pipeline/renderer.ts`)**: `@napi-rs/canvas`, one shared
+`getDocumentProxy` per batch render (never re-open the PDF per page), `RENDER_SCALE` (default 1.5 —
+legibility verified once against the earnings deck, then pinned), PNGs persisted to
+`UPLOAD_DIR/images/{docId}/p{N}.png`, 3–4 pages per multi-image vision call. Immediately release memory
+(zero the canvas, drop refs, `page.cleanup()`):
 
 ```typescript
-import { createCanvas } from 'canvas';
+import * as canvas from '@napi-rs/canvas';
 
-async function renderPageToDataUrl(page: PDFPageProxy, scale = 2): Promise<string> {
-  const viewport = page.getViewport({ scale });
-  const canvas = createCanvas(viewport.width, viewport.height);
+async function renderBatchImages(documentId: string, filePath: string, pageNumbers: number[]) {
+  const { getDocumentProxy } = await import('unpdf');
+  const pdf = await getDocumentProxy(new Uint8Array(await Bun.file(filePath).arrayBuffer()));
   try {
-    const ctx = canvas.getContext('2d') as unknown as CanvasRenderingContext2D;
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    return canvas.toDataURL('image/png');
+    // render each page at RENDER_SCALE → Bun.write PNG → page.cleanup(), zero canvas
   } finally {
-    canvas.width = 0;
-    canvas.height = 0;
+    await pdf.destroy();
   }
 }
 ```
@@ -308,10 +332,11 @@ not batched at the end — this is what keeps memory O(1 page) and makes progres
 ```sql
 page_chunks(
   id, document_id, page_number, chunk_index,   -- page_number = PDF index (1-based position in file), drives the viewer
-  raw_text, is_table_heavy,
-  image_path,       -- null unless vision-flagged (table-heavy or low-text fallback)
+  raw_text, is_table_heavy, is_low_text, needs_vision,  -- needsVision = isLowText; the single vision gate
+  image_path,       -- null unless rendered (low-text pages, escalated table pages)
   position_data jsonb,  -- array of TextRun objects, kept for frontend highlight mapping
   token_estimate int,
+  extraction_status,    -- pending | extracted | extraction_failed | extraction_deferred (Phase 2)
   created_at
 )
 ```
@@ -322,7 +347,7 @@ If the extractor reads a printed number in-text, store it as `qualifiers.printed
 overwrite `sourcePage` with it. Note the jump in the README/demo so reviewers aren't confused.
 
 Store `position_data` as JSONB now. The frontend PDF viewer reads it back to draw highlight
-overlays later. Do not reconstruct position data from `pdfjs-dist` a second time on the frontend.
+overlays later. Do not reconstruct position data from pdf.js a second time on the frontend.
 
 **Status updates**: update `documents.status` to `'parsing'` when the job starts, `'parsed'` when
 done, `'failed'` with an error message on exception. Publish per-page progress to
@@ -330,17 +355,24 @@ done, `'failed'` with an error message on exception. Publish per-page progress t
 total: numPages } }`), fire-and-forget — never await WS delivery from the worker. The API
 forwards these over the WebSocket (see Phase 5).
 
-### Exit criteria
+### Exit criteria ✅ MET (Phase 1 as-built)
 
 1. Upload any PDF via `POST /documents`.
 2. A debug endpoint (`GET /documents/:id/chunks`) returns page-level chunks.
-3. Table-heavy AND low-text/chart-slide pages include a rendered image path; dense text-only pages do not.
+3. Low-text/chart-slide pages include a rendered image path; dense text-only pages (including
+   table-heavy ones) do not — unless escalated after weak text extraction.
 4. Position data in `page_chunks.position_data` contains real x/y/width/height, not zeros.
-5. `documents.status` is `'parsed'` on completion.
+5. `documents.status` is `'parsed'` on completion (then auto-chains `extract-document`).
 
 ---
 
-## Phase 2 — Fact Extraction [Core]
+## Phase 2 — Fact Extraction [Core] ✅ BUILT
+
+As-built (Sep 2026): single-vendor pipeline — OpenAI-compatible gateway (`LLM_BASE_URL` + `LLM_API_KEY`,
+direct-Google as env-only fallback), `gemini-3.5-flash-lite` for text + vision (`thinkingBudget: 0`),
+`gemini-embedding-001` @1536 for all vectors. Storage stays per-page; **only LLM call granularity is
+batched** (output-budget packing, page markers, validated per-fact `pageNumber`). Sections below are the
+as-built record.
 
 ### Zod schema
 
@@ -401,44 +433,52 @@ Rules:
 
 ### LLM calls
 
-Use Vercel AI SDK `generateObject`. Two paths, same schema:
+Use Vercel AI SDK `generateObject` against the gateway. Two paths, same schema (+ per-fact `pageNumber`):
 
-**Text chunk path (Groq):**
+**Batched text path (`extractBatch`):**
 ```typescript
 import { generateObject } from 'ai';
-import { createGroq } from '@ai-sdk/groq';
+import { createOpenAI } from '@ai-sdk/openai';   // gateway transport; same code direct-to-Google
 
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+const llm = createOpenAI({ baseURL: process.env.LLM_BASE_URL, apiKey: process.env.LLM_API_KEY });
 
+// pages packed to EXTRACT_TARGET_OUTPUT_TOKENS (~40–45K expected output ≈ 10–18 pages;
+// small docs collapse to ONE call). NEVER fixed 50-page batches: the 64K output cap
+// truncates dense docs silently. Batch prompt wraps pages in <page n> markers and
+// instructs cross-page dedup (emit each distinct fact once, richest instance).
 const { object } = await generateObject({
-  model: groq('llama-3.3-70b-versatile'),
-  schema: ExtractionResultSchema,
+  model: llm(process.env.TEXT_MODEL ?? 'gemini-3.5-flash-lite'),
+  schema: BatchExtractionResultSchema,   // facts[] + pageNumber per fact
   system: EXTRACTION_SYSTEM_PROMPT,
-  prompt: `Extract facts from this document chunk:\n\n${chunk.rawText}`,
+  prompt: `<page 3>…</page>\n<page 4>…</page>…`,
+  providerOptions: { thinkingBudget: 0 },   // thinking bills as output; zero extraction benefit
   maxRetries: 2,
 });
+// Every fact's pageNumber is validated ∈ batch pages (invented pages dropped + counted).
+// Failed batches split-half retry once, then mark pages extraction_failed and continue.
 ```
 
-**Table-page path (Gemini vision):**
+**Vision path (low-text/chart pages + table escalations, 3–4 images per call):**
 ```typescript
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-
-const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY });
-
 const { object } = await generateObject({
-  model: google('gemini-2.0-flash'),   // confirm structured output support before committing to this model
-  schema: ExtractionResultSchema,
+  model: llm(process.env.VISION_MODEL ?? 'gemini-3.5-flash-lite'),
+  schema: BatchExtractionResultSchema,
   system: EXTRACTION_SYSTEM_PROMPT,
   messages: [{
     role: 'user',
     content: [
-      { type: 'image', image: chunk.imageDataUrl },
-      { type: 'text', text: 'Extract all facts visible in this table.' },
+      // image 1 = page 7, image 2 = page 12, … (explicit ordering instruction)
+      { type: 'image', image: dataUrl1 }, { type: 'image', image: dataUrl2 },
+      { type: 'text', text: 'Extract all facts visible in these pages.' },
     ],
   }],
+  providerOptions: { thinkingBudget: 0 },
   maxRetries: 2,
 });
 ```
+
+Gateway passthrough (native structured output, not downgraded JSON mode) was verified in the
+passthrough spike before relying on it.
 
 **Fallback for structured output failures**: wrap the call in a try/catch. If `generateObject`
 throws a schema validation error, fall back to a raw `generateText` call and attempt
@@ -463,34 +503,30 @@ string check, keep `sourceQuoteValid = false` with `{ visionOnly: true }`, and k
 
 ### Embedding
 
-After validation, generate an embedding for each fact's predicate + value + entity name (one
-concatenated string). Use Google's `gemini-embedding-2` via the Vercel AI SDK `@ai-sdk/google`
-`embed()` / `embedMany()` helper. With `outputDimensionality: 1536` (via Matryoshka Representation
-Learning), we maintain standard float4 pgvector HNSW index compatibility (< 2000 dims limit)
-and retain >98% retrieval performance while halving storage. Never mix models in the same
-vector column, or cosine similarity becomes meaningless across rows.
+After validation, collect ALL of the document's embedding inputs (one concatenated
+`fact: <entity> <predicate> <value>` string per fact), then embed in as few calls as possible.
+Model: `gemini-embedding-001` with `outputDimensionality: 1536` (MRL point, ~68.2 MTEB) and explicit
+`task_type: RETRIEVAL_DOCUMENT` for stored vectors — 001 chosen over embedding-2 deliberately (2
+aggregates list inputs into a single vector, breaking per-fact batching; 001 returns true per-string
+vectors and supports `taskType`). 001 does not auto-normalize truncated dims, so every vector is
+L2-normalized client-side before insert. `vector(1536)` stays within the pgvector HNSW <2000-dim limit.
+Never mix models in the same vector column, or cosine similarity becomes meaningless across rows.
 
 ```typescript
-import { embed, embedMany } from 'ai';
-import { createGoogleGenerativeAI, type GoogleEmbeddingModelOptions } from '@ai-sdk/google';
+import { embedMany } from 'ai';
 
-const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY });
-
-const { embedding } = await embed({
-  model: google.embedding(process.env.EMBEDDING_MODEL ?? 'gemini-embedding-2'),
-  value: `${fact.entity.name} ${fact.predicate} ${fact.value}`,
-  providerOptions: {
-    google: {
-      outputDimensionality: Number(process.env.EMBEDDING_DIM ?? 1536),
-    } satisfies GoogleEmbeddingModelOptions,
-  },
+const { embeddings } = await embedMany({
+  model: gateway.embedding(process.env.EMBEDDING_MODEL ?? 'gemini-embedding-001'),
+  values: inputs,                       // up to ~100 per call; facts + distinct type descriptions
+  providerOptions: { outputDimensionality: 1536, taskType: 'RETRIEVAL_DOCUMENT' },
 });
+const normalized = embeddings.map(l2normalize);
 ```
 
-Batch embed where possible via `embedMany` (max 100 per call for Gemini `:batchEmbedContents`).
-Do not embed one fact at a time in a loop. Note: `gemini-embedding-2` dropped explicit `taskType`
-parameters (which were supported in `gemini-embedding-001`); task-specific guidance or framing is
-included in the text content prefix if needed (e.g., `fact: ...` or `entity: ...`).
+One `embedMany` for facts, one for the document's distinct `factTypeDescription`s (canonicalization
+inputs — never one-embed-per-description in a loop). If the gateway mangles embed params,
+`EMBED_DIRECT=1` routes embeds direct-to-Google (free-tier embed quotas are generous); code paths stay
+identical.
 
 ### `fact_types` canonicalization
 
@@ -519,26 +555,42 @@ await db.insert(facts).values({
   currency: fact.currency,
   timeScope: fact.timeScope,
   qualifiers: fact.qualifiers ?? {},
-  embedding: embedding,
+  embedding: embedding,        // 001 @1536, L2-normalized
   confidence: fact.confidence,
-  sourcePage: chunk.pageNumber,
+  sourcePage: chunk.pageNumber,       // PDF index; printed labels → qualifiers.printedPage only
+  sourceChunkIndex: chunk.chunkIndex, // precise grounding for split pages
   sourceQuote: fact.sourceQuote,
-  sourceQuoteValid: quoteIsValid,
+  sourceQuoteValid: quoteIsValid,     // false + visionOnly for vision-only facts
   extractedAt: new Date(),
 });
+// Chunks carry extraction_status: pending | extracted | extraction_failed | extraction_deferred.
+// Extract job is idempotent (delete-doc-facts-first, load-before-delete); re-runs add zero rows.
 ```
 
-### Exit criteria
+### Rate discipline (applies to every gateway call in this phase and all later ones)
+
+Process-global token bucket just under dashboard RPM (`LLM_RPM_BUDGET`; 12 on direct-Google fallback),
+429 → exponential backoff + jitter pausing the bucket globally, single keep-alive HTTP client
+(no per-call construction — saves a handshake per request). `EXTRACT_CONCURRENCY` (default 6) and
+worker job concurrency (3) are downstream of the bucket. Failed batches split-half retry once.
+
+### Exit criteria ✅ MET (Phase 2 as-built)
 
 1. Upload one starter PDF. `GET /facts?documentId=<id>` returns facts.
-2. Every fact has a non-empty `sourceQuote`.
-3. For a randomly sampled fact, the `sourceQuote` is verifiably present in the source PDF text.
-4. Facts that failed quote validation are flagged (`sourceQuoteValid = false`), not silently dropped.
-5. `fact_types` table has at least one row per document.
+2. Every text-path fact has a non-empty `sourceQuote`.
+3. For a randomly sampled fact, the `sourceQuote` is verifiably present in the source PDF text
+   (quote-valid rate is logged per run — the number that replaces estimates).
+4. Facts that failed quote validation are flagged (`sourceQuoteValid = false`), not silently dropped;
+   vision-only facts carry `visionOnly: true`.
+5. `fact_types` table has at least one row per document; paraphrase dedup covered by test.
+6. Recorded wall-clock + gateway spend per run (live-test benchmark log) — no estimated numbers.
 
 ---
 
-## Phase 3 — Entity Resolution [Core]
+## Phase 3 — Entity Resolution [Core] ⬅ NEXT (execute after current implementation)
+
+This is the step most submissions skip. Build it deliberately. Same gateway setup as Phase 2 —
+no new vendor, no new key, inside the same rate bucket.
 
 This is the step most submissions skip. Build it deliberately.
 
@@ -560,18 +612,20 @@ the canonical name.
 
 For each newly extracted entity, after within-document clustering:
 
-1. Embed the canonical name + context sentence.
+1. Embed the canonical name + context sentence with `gemini-embedding-001`
+   (`task_type: RETRIEVAL_DOCUMENT`, 1536-dim, L2-normalized — same space as every other vector
+   in the store; never mix models per column).
 2. Query: `SELECT id, canonicalName FROM entities ORDER BY embedding <=> $1 LIMIT 5`.
 3. For each candidate with cosine similarity > `ENTITY_MATCH_THRESHOLD`:
-   - Make an LLM call (small, cheap — Groq `llama-3.1-8b-instant` is sufficient here):
-     ```
-     Are these two entities the same real-world entity?
-     Entity A: "{name}" — context: "{context}"
-     Entity B: "{canonicalName}" — context: "{existingContext}"
-     Answer YES or NO with one sentence of reasoning.
-     ```
-   - If YES: link to existing entity, insert an alias row.
-   - If NO: create a new entity.
+   - Make an LLM confirm call through the gateway (Flash-Lite, `thinkingBudget: 0` — cheap):
+      ```
+      Are these two entities the same real-world entity?
+      Entity A: "{name}" — context: "{context}"
+      Entity B: "{canonicalName}" — context: "{existingContext}"
+      Answer YES or NO with one sentence of reasoning.
+      ```
+    - If YES: link to existing entity, insert an alias row.
+    - If NO: create a new entity.
 
 **Do not trust embedding distance alone** for cross-document resolution. "Apple Inc." and "Apple
 Records" can embed close to each other. The lightweight LLM confirm call is cheap (< 50 tokens)
@@ -597,14 +651,16 @@ After entity resolution, update `facts.entityId` for all facts in the document j
 
 ---
 
-## Phase 4 — Matching and Reconciliation [Core]
+## Phase 4 — Matching and Reconciliation [Core] ⬅ NEXT (after Phase 3)
 
 This phase produces required cases 1–3.
 
 ### Fact matching
 
 For each new fact, run a nearest-neighbor search over facts from *other* documents sharing the same
-resolved entity:
+resolved entity. Embed the query side with `gemini-embedding-001` (`task_type: RETRIEVAL_QUERY` or
+`SEMANTIC_SIMILARITY`, paired by design against stored `RETRIEVAL_DOCUMENT` vectors — same model,
+same 1536 dims, L2-normalized both sides):
 
 ```typescript
 const candidates = await db
@@ -648,11 +704,14 @@ For each `(newFact, candidate)` pair, run deterministic checks first:
 Only escalate to the LLM judge when the rule filter cannot cleanly resolve the relationship.
 This keeps costs low and makes the rule layer a genuine first-pass, not a bottleneck.
 
-### LLM judge (Gemini)
+### LLM judge (gateway Flash-Lite)
 
 ```typescript
 const { object } = await generateObject({
-  model: google('gemini-2.0-pro'),     // stronger reasoning here, fewer calls
+  model: llm(process.env.JUDGE_MODEL ?? 'gemini-3.5-flash-lite'),
+  // Flash-Lite is the default (same gateway, same bucket); a small thinking budget
+  // is allowed here — reconciliation is the ONE place reasoning tokens pay for themselves.
+  // Escalate JUDGE_MODEL only if explanations are thin on the starter PDFs.
   schema: z.object({
     relationType: z.enum(['corroborates', 'contradicts', 'reconciled', 'uncertain']),
     explanation: z.string(),           // plain-language reasoning, surfaces in the UI
@@ -786,6 +845,8 @@ in a table (JSONL or CSV is fine, just keep it). Log:
 
 **The final number belongs in the README.** "Spot-checked 30 facts from 3 PDFs, 26 correct (87%);
 3 failures from table-page extraction, 1 entity mis-merge." That's a concrete, trustable claim.
+Log gateway spend alongside it (per-run benchmark log already captures wall-clock + $ estimate) —
+a precision number without its cost context is half the story.
 
 ### Exit criteria
 
@@ -834,7 +895,8 @@ Use `useQuery` for reads, `useMutation` for the PDF upload. Invalidate `['docume
 
 `PDFViewer.tsx` is the most technically complex component. Two-layer approach:
 
-1. **Canvas layer**: `pdfjs-dist` renders the page to a `<canvas>`. Scale = `devicePixelRatio`.
+1. **Canvas layer**: `pdfjs-dist` renders the page to a `<canvas>` in the browser (same pdf.js
+   coordinate system the backend `unpdf` extractor emits — no translation layer). Scale = `devicePixelRatio`.
 2. **SVG overlay layer**: positioned absolutely over the canvas, same dimensions. For each
    highlighted span, draw a `<rect>` using the `TextRun` position data from `position_data`
    (stored in Phase 1). Fill with `rgba(255, 230, 0, 0.35)`.
@@ -977,17 +1039,18 @@ sources). Run it through the pipeline. Record:
 - Time per chunk in the extraction stage (note: this is mostly LLM API latency)
 - Memory high-water mark of the worker process (`process.memoryUsage().heapUsed`)
 
-Expected bottleneck: LLM API calls. Parsing itself stays sequential (one page at a time per
-the lazy stream); extraction gets concurrency. If extraction is too slow, add concurrency:
+Expected bottleneck: LLM API calls (generation at ~350 tok/s dominates; parse stays sequential
+one page at a time per the lazy stream). Extraction already runs per-batch `pMap` at
+`EXTRACT_CONCURRENCY` (default 6) behind the process-global rate bucket:
 
 ```typescript
-// Process chunks in batches of 5 concurrently, not one at a time
-const EXTRACTION_CONCURRENCY = 5;
-await pMap(chunks, extractChunk, { concurrency: EXTRACTION_CONCURRENCY });
+// Process output-budget batches concurrently, never unbounded
+await pMap(batches, extractBatch, { concurrency: Number(process.env.EXTRACT_CONCURRENCY ?? 6) });
 ```
 
-Use `p-map` or a simple semaphore. Do not `Promise.all()` all chunks at once — this will hit
-rate limits.
+Use `p-map` with the token bucket as governor. Do not `Promise.all()` all batches at once — this
+will hit rate limits. If extraction is still too slow, raise concurrency only up to the dashboard
+RPM headroom, and confirm via the per-run wall-clock log that generation (not queueing) dominates.
 
 ### Many-PDF test
 
@@ -1054,8 +1117,13 @@ omitting it.
 ## Approach
 - Architecture summary (reference architecture.md for depth)
 - Key decisions with explicit trade-offs: pgvector vs. dedicated vector DB, Bun/Elysia vs. Node/Express,
-  two-stage reconciliation, pdfjs-dist as the shared coordinate system
-- AI tools used: Groq for speed, Gemini for reasoning and vision, Vercel AI SDK for structured output
+  two-stage reconciliation, unpdf as the shared coordinate system, output-budget batching (never fixed
+  50-page batches — the 64K output cap truncates dense docs silently)
+- AI tools used: single-vendor Gemini via gateway (`gemini-3.5-flash-lite` text+vision, `thinkingBudget: 0`;
+  `gemini-embedding-001` @1536 with explicit `task_type` + client-side L2 norm), Vercel AI SDK for
+  structured output. No SambaNova/Groq in the final pipeline (removed during the Phase-2 refactor).
+- Data-use disclosure (non-negotiable): gateway/proxy sees document bytes; free-tier Google inputs may
+  be used to improve Google's products. Demo/starter PDFs only, no sensitive uploads.
 - The four-tier pipeline pattern (rule pre-filter → embedding search → fast LLM → strong LLM)
 - Superjoin relevance: this is the "one source of truth" problem in miniature — multiple docs,
   overlapping facts, same reconciliation challenge
@@ -1112,9 +1180,11 @@ possible examples for each of the four required cases before recording the video
 
 | Risk | Where it bites | Pre-emption |
 |---|---|---|
-| Gemini structured output not working on a specific model version | Phase 2 | Test structured output before building the extraction path. Have the raw-parse fallback ready from day one. |
-| `pdfjs-dist` in Bun missing canvas bindings | Phase 1 table render | Install `canvas` npm package and test rendering a single table-heavy page (render → persist → `page.cleanup()` + zero canvas) before writing the rest of Phase 1. |
-| Embedding model changed mid-project | Phases 2–4 | Lock to one model in `EMBEDDING_MODEL` env var. Never mix models in `facts.embedding`. |
+| Gateway structured-output passthrough downgraded | Phases 2–4 | Verified in the passthrough spike before relying on it; `generateText` + safe-parse fallback stays wired permanently. |
+| Gateway/proxy strips a provider param (e.g. thinking budget) | Phases 2–4 | Best-effort `providerOptions`; measured in the spike (thinking-token presence logged). Lite defaults are light — acceptable if stripped. |
+| `unpdf` + `@napi-rs/canvas` render fails on a new document shape | Vision lane | Single shared proxy per batch render, guarded destroy; vision failure marks pages failed, never fails the document. `canvas` (unused twin dep) already removed. |
+| Embedding model changed mid-project | Phases 2–4 | Locked to `gemini-embedding-001` in `EMBEDDING_MODEL`. Never mix models in `facts.embedding`. (001 chosen over embedding-2: 2 aggregates list inputs into one vector.) |
+| Gateway $5 budget or RPM wall | Any live run | Live-test dollar caps in-file; fixture tests 1–2 pages; full-doc runs are explicit smokes. Token bucket just under dashboard RPM; 429 → backoff + split-half. Spend logged per run. |
 | Entity false-merge corrupts reconciliation | Phase 3 | Don't trust embedding distance alone. The LLM confirmation call is non-optional. |
 | WebSocket Redis subscriber shares connection with BullMQ | Phase 5 | Create a dedicated subscriber client. BullMQ's `IORedis` connection and a pub/sub subscriber must be separate instances. |
 | Demo Highlights broken after DB reset | Phase 6 | Store IDs in `demoHighlights.json` only after confirmed final state. Re-run curation if DB is reset. |

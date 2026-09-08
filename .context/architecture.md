@@ -15,41 +15,46 @@ The brief explicitly rewards a small, understandable system over a large, unclea
 ## 1. Architecture Overview
 
 ```
-                    ┌─────────────────┐
-   PDF upload  ───► │  Ingestion API   │
-                    └────────┬─────────┘
-                             ▼
                      ┌─────────────────┐
-                     │  Parser/Chunker  │  (pdfjs-dist, page-by-page lazy stream; text + position; table pages → image)
+    PDF upload  ───► │  Ingestion API   │
                      └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │ Fact Extractor   │  (LLM, structured output per chunk)
-                    └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │ Entity Resolver  │  (canonicalize people/orgs/places)
-                    └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │  Fact Store      │  Postgres + pgvector
-                    │  (facts, spans,  │
-                    │  entities, docs) │
-                    └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │ Matcher/Cluster  │  (embedding similarity, incremental)
-                    └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │ Reconciliation   │  rule pre-filter → LLM judge → labeled
-                    │ Engine           │  relationship + explanation
-                    └────────┬─────────┘
-                             ▼
-                    ┌─────────────────┐
-                    │  Query API + UI  │  fact browser, evidence viewer, graph view
-                    └─────────────────┘
+                              ▼
+                      ┌─────────────────┐
+                      │  Parser/Chunker  │  (unpdf, page-by-page lazy stream; text + position; low-text/chart pages → image, tables text-first)
+                      └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │ Fact Extractor   │  (Flash-Lite, structured output, output-budget batches with page markers)
+                     └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │ Entity Resolver  │  (canonicalize people/orgs/places)
+                     └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │  Fact Store      │  Postgres + pgvector
+                     │  (facts, spans,  │
+                     │  entities, docs) │
+                     └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │ Matcher/Cluster  │  (embedding similarity, incremental)
+                     └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │ Reconciliation   │  rule pre-filter → LLM judge → labeled
+                     │ Engine           │  relationship + explanation
+                     └────────┬─────────┘
+                              ▼
+                     ┌─────────────────┐
+                     │  Query API + UI  │  fact browser, evidence viewer, graph view
+                     └─────────────────┘
 ```
+
+> **Implementation status (Sep 2026):** Ingestion → parsing → fact extraction are **built as described
+> below** (unpdf streaming parse, batched gateway extraction, 001 embeddings). Entity resolution,
+> matching, and reconciliation are **next** — §§4.3–4.5 are the execution spec, unchanged in intent,
+> with provider references updated to the gateway setup.
 
 Job queue (BullMQ + Redis) sits between ingestion and the extractor/matcher so large PDFs and multi-PDF
 batches don't block the API, and so a new upload only triggers work for that document, not a full rebuild.
@@ -58,9 +63,12 @@ Streaming policy: PDF upload streams to disk (`Bun.write(path, file.stream())`, 
 Page extraction is a lazy page-by-page stream — `getPage(i)` → extract → persist `page_chunks` →
 `page.cleanup()` → publish per-page progress over the WebSocket status channel, never accumulating
 all pages in memory. Source bytes stay resident (PDF xref trailer lives at EOF, so `getDocument`
-holds the file); laziness is processing-level, not I/O-level. LLM fact extraction stays bulk
-per-chunk `generateObject` — token streaming is rejected because schema validation and quote
-verification need the complete chunk and complete quote.
+holds the file); laziness is processing-level, not I/O-level. **Storage stays per-page; only LLM call
+granularity is batched**: pages are packed to an output-token budget (~40–45K expected output, roughly
+10–18 pages) with `<page n>` markers, and every returned fact carries a validated `pageNumber` — the
+model can never invent grounding. Token streaming is rejected because schema validation and quote
+verification need the complete object; per-batch embed-on-validate gives pipeline overlap without
+touching that invariant.
 
 ## 2. Tech Stack
 
@@ -80,13 +88,13 @@ problem, BullMQ is Node-native, so producer and consumer now share a runtime wit
 | Live status | Elysia WebSockets | processing status pushed to the UI instead of polled, cheap since the framework already supports it |
 | Database | PostgreSQL + pgvector | relational facts/evidence plus vector search in one store, no extra infra |
 | ORM | Drizzle | native `vector()` column type and built-in distance functions (`cosineDistance`, etc.) as of 0.31+, fact-matching queries stay typed TypeScript instead of raw SQL strings |
-| LLM extraction tooling | Vercel AI SDK (`generateObject`) with Zod schemas | first-party Groq and Gemini providers, constrains output to a schema instead of hand-parsed JSON; keep a validate-and-retry fallback since structured output with tool-calling is inconsistent across Gemini model versions |
-| LLM | Groq (fast structured extraction) + Gemini (reconciliation judge + vision for table-heavy pages) | same split used in Larity's four-tier pipeline; extraction wants speed per chunk, reconciliation wants stronger reasoning over fewer calls |
-| PDF parsing | `pdfjs-dist` (text + position per run) | native TS, exposes the same position data the frontend viewer needs, no separate coordinate system |
-| Tables | Render table-heavy pages as images, send to Gemini vision | sidesteps building/depending on structured table-extraction code entirely |
+| LLM extraction tooling | Vercel AI SDK (`generateObject`) with Zod schemas, via an OpenAI-compatible gateway (`@ai-sdk/openai` + `LLM_BASE_URL`; direct-Google `@ai-sdk/google` kept as env-switchable fallback) | constrains output to a schema instead of hand-parsed JSON; keep a validate-and-retry fallback since structured-output passthrough varies by gateway/proxy |
+| LLM | `gemini-3.5-flash-lite` for text extraction + vision, `gemini-embedding-001` for all vectors (single `GEMINI`/gateway key family; 3.1 Flash-Lite as config fallback) | one vendor, one rate bucket; Lite wins long-context grounding benchmarks that matter for verbatim quotes; `thinkingBudget: 0` on extraction (thinking bills as output for zero benefit) |
+| PDF parsing | `unpdf` (serverless pdf.js build, Bun-safe; text + position per run) | native TS, exposes the same position data the frontend viewer needs, no separate coordinate system |
+| Tables | Tables go down the **text path** (linearized text is sufficient; merged-cell ambiguity is handled by confidence penalties + quote flags, and is the honest-failure candidate). Vision is reserved for low-text/chart pages plus single-escalation of table pages that yield zero/only-sub-0.7 facts | vision spend drops ~5–10x vs routing every table page; multi-image calls (3–4 pages each) |
 | Frontend | Vite + React + React Router | no SSR/SEO need here, Next.js would add routing and server complexity this project doesn't use |
 | Frontend data layer | TanStack Query + TanStack Table | fetching/caching and the facts browser table, standard choices that cut custom state-management code |
-| Frontend PDF viewer | `pdfjs-dist` viewer pane | needed for inline evidence highlighting, shares the same library used for extraction |
+| Frontend PDF viewer | `pdfjs-dist` viewer pane (browser-side) | needed for inline evidence highlighting, shares pdf.js coordinates with the backend extractor |
 
 ### Considered and rejected
 
@@ -150,13 +158,17 @@ any existing `fact_types` row, it proposes a new one. A canonicalization step ch
 against existing types before minting a new one, so "revenue," "total revenue," and "net revenue" don't
 silently fork into three types unless the document actually distinguishes them.
 
-**Embedding Standard**: Embeddings use Google's `gemini-embedding-2` model configured with Matryoshka
-Representation Learning (MRL) output dimensionality `dim = 1536` (`outputDimensionality: 1536`).
-This preserves >98% retrieval accuracy while remaining within pgvector's 2,000-dimension limit for standard
-float4 HNSW vector index operations (`embedding vector_cosine_ops`), avoiding halfvec overhead.
-Unlike `gemini-embedding-001`, `gemini-embedding-2` does not use explicit `taskType` parameters; any task
-orientation or semantic framing is embedded directly in text prompt prefixes when necessary (e.g. `fact: ...`
-or `entity: ...`).
+**Embedding Standard**: Embeddings use Google's `gemini-embedding-001` (text-only) configured with
+Matryoshka Representation Learning (MRL) output dimensionality `dim = 1536` (`outputDimensionality: 1536`,
+a Google-recommended point scoring ~68.2 MTEB, near the top of the curve). This stays within pgvector's
+2,000-dimension limit for standard float4 HNSW vector index operations (`embedding vector_cosine_ops`),
+avoiding halfvec overhead. 001 is chosen over `gemini-embedding-2` deliberately: 2 aggregates list
+inputs into a *single* vector (per Google's embeddings doc), which breaks per-fact batch embedding —
+001 returns true per-string vectors, and unlike 2 it supports explicit `task_type`. Convention:
+`RETRIEVAL_DOCUMENT` for stored vectors (facts, fact types, entities), `RETRIEVAL_QUERY` /
+`SEMANTIC_SIMILARITY` at match time. Because 001 does not auto-normalize truncated dims, every vector
+is L2-normalized client-side before insert (one-line helper, unit-tested). Never mix models in the same
+vector column, or cosine similarity becomes meaningless across rows.
 
 ## 4. Pipeline Stages
 
@@ -170,14 +182,20 @@ or `entity: ...`).
   page in try/catch so one bad page emits a `pipeline_events` warning and continues instead of
   failing the document. Chunk by page or logical section, not fixed token windows, so evidence
   spans stay meaningful and map cleanly to what the frontend viewer highlights.
-- Detect table-heavy pages (density of numeric tokens and short lines is a cheap enough heuristic) and
-  route those to Gemini as a rendered page image instead of parsed text. Also render low-text pages
-  (`rawText.length < ~1000` chars or text-item count < N — e.g. earnings-deck chart slides where the
-  figures live in vector graphics, not extractable text): the numeric-density heuristic never fires
-  there, so without this fallback those pages would go down the text path with almost nothing.
-  Render vision pages only, at 2x, then immediately release canvas memory (`page.cleanup()`, zero
-  the canvas, drop refs). Quote validation is skipped for vision-only facts with no source text
-  (flagged, not silently dropped).
+- Detect table-heavy pages (density of numeric tokens and short lines is a cheap heuristic) but route
+  them down the **text path** — linearized table text is sufficient for extraction, and merged-cell
+  ambiguity is handled downstream by confidence penalties + quote flags (it is also the most natural
+  honest-failure candidate; spending vision to hide it would cost money and the best failure exhibit).
+  Render **low-text pages only** (`rawText.length < ~1000` chars or text-item count < N — e.g.
+  earnings-deck chart slides where the figures live in vector graphics, not extractable text): the
+  numeric-density heuristic never fires there, so without this fallback those pages would go down the
+  text path with almost nothing. Plus a single-escalation rule: a table-heavy page yielding zero facts
+  or only sub-0.7-confidence facts gets one vision attempt.
+  Render vision pages only (3–4 pages per multi-image call), at tuned scale (`RENDER_SCALE`, default
+  1.5 — legibility verified once against the earnings deck, then pinned), persisting PNGs under
+  `UPLOAD_DIR/images/{docId}/`, then immediately release canvas memory (`page.cleanup()`, zero
+  the canvas, drop refs). Quote validation is skipped for vision-only facts with no source text —
+  they persist with `sourceQuoteValid = false` + `{ visionOnly: true }` (flagged, not silently dropped).
   LLMs mis-read merged cells and multi-row headers from raw text more than they misread a table
   they can actually see. Store trimmed run fields (`str`, x, y, width, height) in `position_data`,
   not raw pdfjs objects.
@@ -187,21 +205,33 @@ or `entity: ...`).
 
 ### 4.2 Fact extraction
 - Define a Zod schema (entity, predicate, value, unit, time_scope, qualifiers, verbatim quote,
-  self-reported confidence) and call it through the Vercel AI SDK's `generateObject`, on Groq for text
-  chunks and Gemini vision for table-page images, so both paths return the same shape. No token
-  streaming: structured output plus the verbatim-quote check require the complete object.
-- Confirm the specific Gemini model in use actually supports structured output with tool calling before
-  relying on it, this is inconsistent across Gemini versions, and keep a parse-and-validate fallback for
+  self-reported confidence, plus per-fact `pageNumber` for batched calls) and call it through the Vercel
+  AI SDK's `generateObject` against Flash-Lite via the gateway, so text and vision paths return the same
+  shape. No token streaming: structured output plus the verbatim-quote check require the complete object.
+  Calls are packed to an **output-token budget** (~40–45K expected output, ~10–18 pages per call;
+  small docs collapse to a single call) with `<page n>` markers — never fixed 50-page batches, which
+  would silently truncate against the 64K output cap on dense docs. Failed batches split-half retry,
+  then mark pages failed and continue.
+- `thinkingBudget: 0` on all extraction/vision calls (thinking bills as output for zero extraction
+  benefit). Confirm the gateway forwards native structured output (not downgraded JSON mode) before
+  relying on it — verified in the passthrough spike — and keep a parse-and-validate fallback for
   when it fails rather than assuming the schema constraint always holds.
 - Do not hardcode a fact schema in the prompt beyond a few example shapes. Ask the model to state what
-  kind of fact it found; that becomes the `fact_types` proposal.
-- Validate the quote actually appears in the source chunk (string match) before accepting the fact. This
+  kind of fact it found; that becomes the `fact_types` proposal. Batch-aware prompt: emit each distinct
+  fact once across the batch (cross-page dedup at generation), keep the richest instance.
+- Validate each fact's quote against **its own page's** raw text (string match) before accepting the fact. This
   is a cheap, reliable check against hallucinated evidence and doubles as the failure-detection hook.
+- Rate discipline: a process-global token bucket just under the gateway RPM, 429 → exponential backoff +
+  jitter pausing the bucket globally, single keep-alive HTTP client. `EXTRACT_CONCURRENCY` (default 6)
+  is downstream of the dashboard number, never chosen for elegance.
 
 ### 4.3 Entity resolution
 - Within a document: cluster surface forms by string similarity + embedding.
 - Across documents: match new entities against existing `entities` by embedding distance, confirm close
   matches with a lightweight LLM check (given two names and their local context, same entity or not).
+  Both the check and the embeddings run on the same gateway setup as extraction (Flash-Lite,
+  `thinkingBudget: 0`; entity vectors embedded with `task_type: RETRIEVAL_DOCUMENT`, compared with
+  cosine similarity) — no new vendor, no new key, inside the same rate bucket.
 - This is the part most submissions skip. Handle it deliberately, it directly maps to the address/director
   example in the brief.
 
@@ -285,11 +315,12 @@ Ordered by dependency, not fixed to specific days since the timeline isn't fixed
 demoable on its own before moving to the next; that protects against running out of time with nothing
 working end to end.
 
-**Phase 1: Core pipeline, single document**
-Parsing, extraction with the JSON schema, storage. No matching yet. Success = upload a PDF, see grounded
-facts with real quotes.
+**Phase 1: Core pipeline, single document** ✅ BUILT (Sep 2026)
+Parsing (unpdf lazy stream), batched gateway extraction with quote validation, 001 embeddings,
+`fact_types` canonicalization, storage. No matching yet. Success = upload a PDF, see grounded
+facts with real quotes. Recorded wall-clock + spend per run replace estimates from here on.
 
-**Phase 2: Multi-document matching + reconciliation**
+**Phase 2: Multi-document matching + reconciliation** ⬅ NEXT
 Entity resolution, fact matching, the two-stage reconciliation engine. Success = the four required cases
 are producible from the three starter PDFs.
 
@@ -319,9 +350,15 @@ the four cases shown with evidence and explanation on screen, no dead air.
 
 ## 11. Risks and Open Questions
 
-- Starter PDFs not yet reviewed: fact schema and specific demo cases can't be finalized until they're in
-  hand. Everything above is designed to generalize regardless of what's in them.
-- LLM judge cost/latency for reconciliation at scale: fine for 3-4 PDFs, would need batching or caching
-  for "many PDFs" at real scale. Worth one sentence in Limitations, not worth solving now.
-- Table extraction is the likeliest source of the failure case. Budget time to look for it rather than
-  treating it as a risk to avoid.
+- Starter PDFs in hand (`starter-datasets/`, Delhivery + India-macroeconomy excerpts): thresholds were
+  tuned against them but stay env-overridable and content-agnostic — never add per-document branches.
+  Demo cases get curated from real output in the reconciliation phase, not pre-decided.
+- Gateway budget + rate discipline: ~$5 credit covers the assignment at ~$0.50–0.70 per dense 100-pager;
+  live-test dollar caps stay mandatory, fixture tests stay 1–2 pages, full-doc live runs are explicit
+  smoke tests only. Client token bucket just under dashboard RPM; 429 → backoff + split-half retry.
+- LLM judge cost/latency for reconciliation at scale: fine for 3-4 PDFs on the gateway, would need
+  batching or caching for "many PDFs" at real scale. Worth one sentence in Limitations, not worth solving now.
+- Table extraction is the likeliest source of the failure case — now by design, since tables go down
+  the text path. Budget time to look for it rather than treating it as a risk to avoid.
+- Free-tier/direct-Google fallback: no context caching, ~10–15 RPM. If the gateway is ever bypassed,
+  drop `EXTRACT_CONCURRENCY` to 3–4. The code path is identical (env-only switch).
