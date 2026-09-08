@@ -7,6 +7,7 @@ import { Elysia } from "elysia";
 import Redis from "ioredis";
 import { closeQueue } from "./lib/queue";
 import { documentRoutes } from "./routes/documents";
+import { factRoutes } from "./routes/facts";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
 
@@ -64,11 +65,7 @@ export const app = new Elysia()
     version: "0.1.0",
   }))
   .use(documentRoutes)
-  .group("/facts", (group) =>
-    group.get("/", () => ({
-      message: "Facts listing will be implemented in Phase 2 & 5",
-    }))
-  )
+  .use(factRoutes)
   .group("/entities", (group) =>
     group.get("/", () => ({
       message: "Entities listing will be implemented in Phase 3 & 5",

@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { db, documents, eq, type ParseJob, pageChunks } from "@grounded/db";
 import dotenv from "dotenv";
 import Redis from "ioredis";
+import { addExtractJob } from "../lib/queue";
 import { streamPages } from "../pipeline/parser";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
@@ -149,6 +150,16 @@ export const processParseJob = async (
       .catch((_err) => {
         // Ignored: fire-and-forget
       });
+
+    // Enqueue extraction on success (chaining)
+    try {
+      await addExtractJob({ documentId });
+    } catch (enqueueErr) {
+      console.warn(
+        `[Warning] Failed to enqueue extract-document for ${documentId}:`,
+        enqueueErr
+      );
+    }
 
     return {
       documentId,

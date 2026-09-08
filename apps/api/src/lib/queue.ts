@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { PARSE_QUEUE, type ParseJob } from "@grounded/db";
+import { type ExtractJob, PARSE_QUEUE, type ParseJob } from "@grounded/db";
 import { Queue } from "bullmq";
 import dotenv from "dotenv";
 import Redis from "ioredis";
@@ -14,7 +14,7 @@ export const queueConnection = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
 
-export const parseQueue = new Queue<ParseJob>(PARSE_QUEUE, {
+export const parseQueue = new Queue<ParseJob | ExtractJob>(PARSE_QUEUE, {
   connection: queueConnection,
   defaultJobOptions: {
     attempts: 3,
@@ -29,6 +29,11 @@ export const parseQueue = new Queue<ParseJob>(PARSE_QUEUE, {
 
 export const addParseJob = async (job: ParseJob): Promise<string> => {
   const result = await parseQueue.add("parse-pdf", job);
+  return result.id ?? "";
+};
+
+export const addExtractJob = async (job: ExtractJob): Promise<string> => {
+  const result = await parseQueue.add("extract-document", job);
   return result.id ?? "";
 };
 

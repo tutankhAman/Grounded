@@ -2,7 +2,14 @@ import { resolve } from "node:path";
 import dotenv from "dotenv";
 import { defineConfig } from "drizzle-kit";
 
-dotenv.config({ path: resolve(import.meta.dirname, "../../.env") });
+dotenv.config({
+  path: resolve(
+    typeof import.meta.dirname === "string"
+      ? import.meta.dirname
+      : process.cwd(),
+    "../../.env"
+  ),
+});
 
 export default defineConfig({
   dbCredentials: {

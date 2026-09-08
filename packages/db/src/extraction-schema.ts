@@ -8,11 +8,12 @@ export const ExtractedFactSchema = z.object({
     .describe("Confidence score from 0.0 to 1.0"),
   currency: z
     .string()
-    .optional()
-    .describe("ISO currency or symbol if applicable"),
+    .nullish()
+    .describe("ISO currency or symbol if applicable, or null"),
   entity: z.object({
     context: z
-      .string()
+      .union([z.string(), z.record(z.unknown()), z.array(z.unknown())])
+      .transform((c) => (typeof c === "string" ? c : JSON.stringify(c)))
       .describe(
         "One sentence of surrounding context making the entity unambiguous"
       ),
@@ -28,9 +29,14 @@ export const ExtractedFactSchema = z.object({
     .string()
     .describe("snake_case identifier for the property/attribute"),
   qualifiers: z
-    .record(z.string())
-    .optional()
-    .describe("Any qualifiers that modify the fact meaning"),
+    .array(
+      z.object({
+        key: z.string(),
+        value: z.string(),
+      })
+    )
+    .nullish()
+    .describe("Any key-value qualifiers that modify the fact meaning, or null"),
   rawValue: z
     .string()
     .describe("Verbatim representation as stated in the text"),
@@ -39,10 +45,13 @@ export const ExtractedFactSchema = z.object({
     .describe("Verbatim quote from the source chunk supporting this fact"),
   timeScope: z
     .string()
-    .optional()
-    .describe("Fiscal year, date, or period of validity"),
-  unit: z.string().optional().describe("Measurement unit if applicable"),
-  value: z.string().describe("Normalized value where possible"),
+    .nullish()
+    .describe("Fiscal year, date, or period of validity, or null"),
+  unit: z
+    .string()
+    .nullish()
+    .describe("Measurement unit if applicable, or null"),
+  value: z.coerce.string().describe("Normalized value where possible"),
 });
 
 export const ExtractionResultSchema = z.object({

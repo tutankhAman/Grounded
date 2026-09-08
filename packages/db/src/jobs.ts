@@ -5,6 +5,10 @@ export interface ParseJob {
   filePath: string;
 }
 
+export interface ExtractJob {
+  documentId: string;
+}
+
 export interface ParserThresholds {
   chunkTokenSplit: number;
   lowTextChars: number;
