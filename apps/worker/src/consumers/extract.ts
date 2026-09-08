@@ -47,6 +47,7 @@ export interface ExtractResult {
 
 export interface ProcessExtractOptions {
   batchExtractor?: (pages: PageBatchItem[]) => Promise<BatchExtractedFact[]>;
+  skipBoilerplate?: boolean;
   textExtractor?: (rawText: string) => Promise<Record<string, unknown>[]>;
   visionExtractor?: (
     images: string[] | string,
@@ -211,10 +212,21 @@ function groupChunksByPage(
   return pageMap;
 }
 
-function deduplicatePages(pages: PageData[]): {
+export function deduplicatePages(
+  pages: PageData[],
+  skipBoilerplate = process.env.SKIP_BOILERPLATE !== "0"
+): {
   duplicatePageMap: Map<number, number>;
   uniquePages: CompactedPageData[];
 } {
+  if (!skipBoilerplate) {
+    const uniquePages: CompactedPageData[] = pages.map((p) => ({
+      ...p,
+      compactedText: p.rawText,
+    }));
+    return { duplicatePageMap: new Map<number, number>(), uniquePages };
+  }
+
   const repeatedBoilerplate = findRepeatedStrings(
     pages.map((p) => ({ text: p.rawText }))
   );
@@ -770,7 +782,10 @@ export const processExtractJob = async (
   const pages = Array.from(pageMap.values()).sort(
     (a, b) => a.pageNumber - b.pageNumber
   );
-  const { duplicatePageMap, uniquePages } = deduplicatePages(pages);
+  const { duplicatePageMap, uniquePages } = deduplicatePages(
+    pages,
+    options?.skipBoilerplate
+  );
   const { skippedChunkIds, textPages, visionPages } =
     categorizePages(uniquePages);
 

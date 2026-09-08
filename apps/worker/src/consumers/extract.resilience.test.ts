@@ -9,6 +9,7 @@ import {
   splitBatch,
   validateBatchResult,
 } from "../pipeline/extractor";
+import { deduplicatePages } from "./extract";
 
 describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
   describe("TokenBucketRateLimiter", () => {
@@ -171,6 +172,61 @@ describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
         rawText: "Table content with numbers",
       });
       expect(decision).toBe("extract-text-table");
+    });
+
+    test("deduplicatePages bypasses boilerplate stripping and dedup when skipBoilerplate is false", () => {
+      const samplePages = [
+        {
+          chunkIds: ["c1"],
+          firstChunkIndex: 0,
+          isLowText: false,
+          isTableHeavy: false,
+          pageNumber: 1,
+          rawText: "Header line\nPage 1 content\nFooter line",
+          tokenEstimate: 50,
+        },
+        {
+          chunkIds: ["c2"],
+          firstChunkIndex: 1,
+          isLowText: false,
+          isTableHeavy: false,
+          pageNumber: 2,
+          rawText: "Header line\nPage 2 content\nFooter line",
+          tokenEstimate: 50,
+        },
+        {
+          chunkIds: ["c3"],
+          firstChunkIndex: 2,
+          isLowText: false,
+          isTableHeavy: false,
+          pageNumber: 3,
+          rawText: "Header line\nPage 3 content\nFooter line",
+          tokenEstimate: 50,
+        },
+        {
+          chunkIds: ["c4"],
+          firstChunkIndex: 3,
+          isLowText: false,
+          isTableHeavy: false,
+          pageNumber: 4,
+          rawText: "Header line\nPage 1 content\nFooter line",
+          tokenEstimate: 50,
+        },
+      ];
+
+      // When skipBoilerplate = false:
+      const bypassed = deduplicatePages(samplePages, false);
+      expect(bypassed.duplicatePageMap.size).toBe(0);
+      expect(bypassed.uniquePages.length).toBe(4);
+      expect(bypassed.uniquePages[0].compactedText).toBe(
+        "Header line\nPage 1 content\nFooter line"
+      );
+
+      // When skipBoilerplate = true:
+      const active = deduplicatePages(samplePages, true);
+      expect(active.uniquePages.length).toBe(3);
+      expect(active.duplicatePageMap.get(4)).toBe(1);
+      expect(active.uniquePages[0].compactedText).toBe("Page 1 content");
     });
   });
 });
