@@ -187,6 +187,19 @@ describe.skipIf(!dbAvailable)("Entities API routes (/entities)", () => {
       expect(json.data[0].canonicalName).toBe("Wayne Enterprises");
     });
 
+    it("escapes SQL wildcards (% and _) in search filter", async () => {
+      const res = await app.handle(
+        new Request("http://localhost:3000/entities?search=%25")
+      );
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        data: { id: string; canonicalName: string }[];
+        pagination: { total: number };
+      };
+      expect(json.data.length).toBe(0);
+      expect(json.pagination.total).toBe(0);
+    });
+
     it("supports pagination controls", async () => {
       const res = await app.handle(
         new Request("http://localhost:3000/entities?limit=1&page=1")

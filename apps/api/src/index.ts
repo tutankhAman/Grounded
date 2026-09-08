@@ -94,9 +94,14 @@ export const app = new Elysia()
       const documentId = ws.data.params.id;
       if (!UUID_REGEX.test(documentId)) {
         ws.send(JSON.stringify({ error: "Invalid document ID format" }));
+        // 4400 is an application-specific WebSocket close code for bad request UUID
         ws.close(4400, "Invalid document UUID");
         return;
       }
+
+      // Subscribe to Redis pubsub BEFORE querying the DB snapshot to prevent
+      // a race condition where a status event published during the query is dropped.
+      await subscribeToDocument(documentId, ws);
 
       const [doc] = await db
         .select({
@@ -109,7 +114,9 @@ export const app = new Elysia()
         .limit(1);
 
       if (!doc) {
+        await unsubscribeFromDocument(documentId, ws);
         ws.send(JSON.stringify({ error: `Document ${documentId} not found` }));
+        // 4404 is an application-specific WebSocket close code for missing resource
         ws.close(4404, "Document not found");
         return;
       }
@@ -126,11 +133,9 @@ export const app = new Elysia()
       ws.send(JSON.stringify(initialEvent));
 
       if (isTerminalStatus(doc.status)) {
+        await unsubscribeFromDocument(documentId, ws);
         ws.close(1000, "Document in terminal state");
-        return;
       }
-
-      await subscribeToDocument(documentId, ws);
     },
     params: t.Object({
       id: t.String(),

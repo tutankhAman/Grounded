@@ -195,7 +195,8 @@ export const factRoutes = new Elysia({ prefix: "/facts" })
         .select()
         .from(relationships)
         .where(or(eq(relationships.factAId, id), eq(relationships.factBId, id)))
-        .orderBy(desc(relationships.createdAt));
+        .orderBy(desc(relationships.createdAt))
+        .limit(100);
 
       if (rels.length === 0) {
         return { data: [] };

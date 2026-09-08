@@ -11,7 +11,12 @@ import {
   relationships,
 } from "@grounded/db";
 import dotenv from "dotenv";
-import { processReconcileJob, pubRedis } from "./reconcile";
+import {
+  evaluateCandidatePair,
+  findCandidateFacts,
+  processReconcileJob,
+  pubRedis,
+} from "./reconcile";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 
@@ -545,6 +550,102 @@ describe("Phase-4 Matching & Reconciliation Integration Suite", () => {
     expect(judgeCallCount).toBe(before);
   });
 
+  test("I12: candidate selection strictly excludes same-document facts and self matches", async () => {
+    const docA = await makeDoc("recon-exclusion-a.pdf");
+    const docB = await makeDoc("recon-exclusion-b.pdf");
+
+    const [entity] = await db
+      .insert(entities)
+      .values({ canonicalName: "Exclusion Test Entity" })
+      .returning();
+    createdEntityIds.push(entity.id);
+
+    // Two facts in docA
+    const [factA1] = await insertFact(docA, {
+      predicate: "annual_revenue",
+      value: "1000000",
+    });
+    const [factA2] = await insertFact(docA, {
+      predicate: "annual_revenue",
+      value: "2000000",
+    });
+
+    // One fact in docB
+    const [factB1] = await insertFact(docB, {
+      predicate: "annual_revenue",
+      value: "1000000",
+    });
+
+    await db
+      .update(facts)
+      .set({ entityId: entity.id })
+      .where(inArray(facts.id, [factA1.id, factA2.id, factB1.id]));
+
+    const queryVec = makeUnitVector(1536, slotFor("annual_revenue 1000000"));
+
+    // 1. Direct query via findCandidateFacts: docA must be excluded, and factA1 must be excluded
+    const candidates = await findCandidateFacts(
+      entity.id,
+      docA,
+      queryVec,
+      0.5,
+      10,
+      factA1.id
+    );
+
+    // Candidates should only contain facts from other documents (docB), never docA or factA1/factA2
+    expect(candidates.length).toBe(1);
+    expect(candidates[0].id).toBe(factB1.id);
+    expect(candidates[0].documentId).toBe(docB);
+
+    // 2. evaluateCandidatePair defense-in-depth rejects same-doc and self-pairs
+    const counters = { judgeCalls: 0, pairsEvaluated: 0, ruleResolved: 0 };
+    const sameDocPair = await evaluateCandidatePair(
+      {
+        currency: null,
+        documentId: docA,
+        embedding: queryVec,
+        entityId: entity.id,
+        entityName: "Exclusion Test Entity",
+        factTypeId: null,
+        id: factA1.id,
+        predicate: "annual_revenue",
+        qualifiers: null,
+        rawValue: "1000000",
+        sourcePage: 1,
+        sourceQuote: "Quote",
+        timeScope: null,
+        unit: null,
+        value: "1000000",
+      },
+      {
+        candidateFilename: "recon-exclusion-a.pdf",
+        currency: null,
+        distance: 0,
+        documentId: docA,
+        entityId: entity.id,
+        entityName: null,
+        factTypeId: null,
+        id: factA2.id,
+        predicate: "annual_revenue",
+        qualifiers: null,
+        rawValue: "2000000",
+        sourcePage: 1,
+        sourceQuote: "Quote 2",
+        timeScope: null,
+        unit: null,
+        value: "2000000",
+      },
+      "recon-exclusion-a.pdf",
+      mockJudgeFn,
+      new Set(),
+      new Set(),
+      counters
+    );
+    expect(sameDocPair).toBeNull();
+    expect(counters.pairsEvaluated).toBe(0);
+  });
+
   // Optional live judge test when keys are configured
   if (hasKey) {
     test("I11: live judge classifies an apparent contradiction (reconciled by timeScope)", async () => {
@@ -580,6 +681,6 @@ describe("Phase-4 Matching & Reconciliation Integration Suite", () => {
 
       expect(["reconciled", "uncertain"]).toContain(result.relationType);
       expect(result.explanation.length).toBeGreaterThan(0);
-    }, 30_000);
+    }, 60_000);
   }
 });

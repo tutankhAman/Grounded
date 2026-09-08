@@ -26,8 +26,9 @@ export const entityRoutes = new Elysia({ prefix: "/entities" })
       );
 
       const trimmedSearch = search?.trim();
-      const whereClause = trimmedSearch
-        ? ilike(entities.canonicalName, `%${trimmedSearch}%`)
+      const escapedSearch = trimmedSearch?.replace(/[%_\\]/g, "\\$&");
+      const whereClause = escapedSearch
+        ? ilike(entities.canonicalName, `%${escapedSearch}%`)
         : undefined;
 
       const [countResult] = await db
@@ -38,6 +39,8 @@ export const entityRoutes = new Elysia({ prefix: "/entities" })
 
       const data = await db
         .select({
+          // Note: "entities"."id" must be explicitly string-quoted to correlate with the outer query,
+          // as Drizzle's ${entities.id} inside a subquery context can resolve to the subquery table.
           aliasCount: sql<number>`(SELECT count(*)::int FROM ${entityAliases} WHERE ${entityAliases.entityId} = "entities"."id")`,
           canonicalName: entities.canonicalName,
           contextSample: entities.contextSample,

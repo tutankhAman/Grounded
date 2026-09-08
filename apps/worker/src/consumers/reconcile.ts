@@ -9,6 +9,7 @@ import {
   facts,
   getReconcileThresholds,
   inArray,
+  ne,
   or,
   type ReconcileJob,
   type ReconciliationResult,
@@ -158,12 +159,13 @@ interface CandidateQueryRow {
   vectorDistance: number | null;
 }
 
-const findCandidateFacts = async (
+export const findCandidateFacts = async (
   entityId: string,
   documentId: string,
   queryEmbedding: number[],
   maxDistance: number,
-  limit: number
+  limit: number,
+  sourceFactId?: string
 ): Promise<CandidateFactRow[]> => {
   const vectorStr = `[${queryEmbedding.join(",")}]`;
   const rows: CandidateQueryRow[] = await db
@@ -191,7 +193,8 @@ const findCandidateFacts = async (
     .where(
       and(
         eq(facts.entityId, entityId),
-        sql`${facts.documentId} <> ${documentId}`,
+        ne(facts.documentId, documentId),
+        sourceFactId ? ne(facts.id, sourceFactId) : undefined,
         sql`${facts.embedding} IS NOT NULL`,
         sql`${facts.embedding} <=> ${vectorStr}::vector < ${maxDistance}`
       )
@@ -297,7 +300,7 @@ interface PendingRelationRow {
   relationType: string;
 }
 
-const evaluateCandidatePair = async (
+export const evaluateCandidatePair = async (
   newFact: ExistingFactRow,
   candidate: CandidateFactRow,
   docFilename: string,
@@ -306,6 +309,13 @@ const evaluateCandidatePair = async (
   seenPairs: Set<string>,
   counters: { judgeCalls: number; pairsEvaluated: number; ruleResolved: number }
 ): Promise<PendingRelationRow | null> => {
+  if (
+    newFact.documentId === candidate.documentId ||
+    newFact.id === candidate.id
+  ) {
+    return null;
+  }
+
   if (
     !isCandidatePredicateMatch(
       newFact.predicate,
@@ -494,7 +504,8 @@ export const processReconcileJob = async (
           documentId,
           queryEmbedding,
           thresholds.matchDistance,
-          thresholds.matchCandidates
+          thresholds.matchCandidates,
+          newFact.id
         );
 
         for (const candidate of candidates) {

@@ -186,12 +186,14 @@ describe.skipIf(!dbAvailable)("WS /documents/:id/status", () => {
       };
     });
 
+    const t0 = Date.now();
     await testRedisPublisher.publish(
       `doc:${pendingDocId}:status`,
       JSON.stringify(liveEvent)
     );
 
     await nextMessagePromise;
+    expect(Date.now() - t0).toBeLessThan(2000);
 
     expect(messages.length).toBe(2);
     expect(messages[1].status).toBe("extracting");

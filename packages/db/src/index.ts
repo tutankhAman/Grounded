@@ -9,6 +9,7 @@ export {
   isNotNull,
   isNull,
   like,
+  ne,
   not,
   or,
   type SQL,
