@@ -1,9 +1,32 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, mock, test } from "bun:test";
 import { existsSync, unlinkSync } from "node:fs";
-import { db, documents, eq } from "@grounded/db";
+import { db, documents, eq, sql } from "@grounded/db";
+
+mock.module("../lib/queue", () => ({
+  addParseJob: mock(async () => "mock-job-id"),
+  closeQueue: mock(async () => {
+    // No-op queue close in unit tests
+  }),
+}));
+
+// Import app pure after queue mock is registered
 import { app } from "../index";
 
-describe("POST /documents API tests", () => {
+// Gate database tests if Postgres is not reachable
+let dbAvailable = false;
+try {
+  await db.execute(sql`SELECT 1`);
+  dbAvailable = true;
+} catch {
+  console.warn("⚠️ Skipping document route tests: Postgres is not reachable.");
+  dbAvailable = false;
+}
+
+// Minimal valid single-page PDF fixture
+const MINIMAL_VALID_PDF =
+  "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000010 00000 n \n0000000060 00000 n \n0000000117 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF";
+
+describe.skipIf(!dbAvailable)("POST /documents API tests", () => {
   const createdDocIds: string[] = [];
 
   afterAll(async () => {
@@ -64,17 +87,18 @@ describe("POST /documents API tests", () => {
       const body = (await res.json()) as { error?: string };
       expect(body.error).toContain("exceeds maximum limit");
     } finally {
-      process.env.MAX_UPLOAD_MB = originalLimit;
+      if (originalLimit === undefined) {
+        delete process.env.MAX_UPLOAD_MB;
+      } else {
+        process.env.MAX_UPLOAD_MB = originalLimit;
+      }
     }
   });
 
-  test("sanitizes traversal filename and writes file successfully", async () => {
-    const pdfBlob = new Blob(
-      ["%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"],
-      {
-        type: "application/pdf",
-      }
-    );
+  test("sanitizes traversal filename, writes file, and omits internal filePath from responses", async () => {
+    const pdfBlob = new Blob([MINIMAL_VALID_PDF], {
+      type: "application/pdf",
+    });
     const formData = new FormData();
     formData.append("file", pdfBlob, "../../../../etc/secret_report.pdf");
 
@@ -98,7 +122,7 @@ describe("POST /documents API tests", () => {
 
     createdDocIds.push(body.id);
 
-    // Verify debug GET /documents/:id endpoint returns 200 with counts
+    // Verify debug GET /documents/:id endpoint returns 200 with counts and no filePath leak
     const getRes = await app.handle(
       new Request(`http://localhost:3000/documents/${body.id}`, {
         method: "GET",
@@ -106,11 +130,13 @@ describe("POST /documents API tests", () => {
     );
     expect(getRes.status).toBe(200);
     const getBody = (await getRes.json()) as {
-      id: string;
       counts: { chunks: number };
+      filePath?: string;
+      id: string;
     };
     expect(getBody.id).toBe(body.id);
     expect(getBody.counts).toBeDefined();
+    expect(getBody.filePath).toBeUndefined(); // Server path is not leaked
 
     // Verify GET /documents/:id/chunks endpoint returns 200 with pagination
     const chunksRes = await app.handle(
