@@ -479,15 +479,15 @@ const { embedding } = await embed({
   providerOptions: {
     google: {
       outputDimensionality: Number(process.env.EMBEDDING_DIM ?? 1536),
-      taskType: 'SEMANTIC_SIMILARITY',
     } satisfies GoogleEmbeddingModelOptions,
   },
 });
 ```
 
 Batch embed where possible via `embedMany` (max 100 per call for Gemini `:batchEmbedContents`).
-Do not embed one fact at a time in a loop. For entity resolution and clustering, set `taskType: 'CLUSTERING'`
-or `'SEMANTIC_SIMILARITY'`.
+Do not embed one fact at a time in a loop. Note: `gemini-embedding-2` dropped explicit `taskType`
+parameters (which were supported in `gemini-embedding-001`); task-specific guidance or framing is
+included in the text content prefix if needed (e.g., `fact: ...` or `entity: ...`).
 
 ### `fact_types` canonicalization
 

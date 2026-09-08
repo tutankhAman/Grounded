@@ -153,16 +153,19 @@ silently fork into three types unless the document actually distinguishes them.
 **Embedding Standard**: Embeddings use Google's `gemini-embedding-2` model configured with Matryoshka
 Representation Learning (MRL) output dimensionality `dim = 1536` (`outputDimensionality: 1536`).
 This preserves >98% retrieval accuracy while remaining within pgvector's 2,000-dimension limit for standard
-float4 HNSW vector index operations (`embedding vector_cosine_ops`), avoiding halfvec overhead. Task types
-are passed explicitly (`SEMANTIC_SIMILARITY` for facts/predicates, `CLUSTERING` for entity resolution).
+float4 HNSW vector index operations (`embedding vector_cosine_ops`), avoiding halfvec overhead.
+Unlike `gemini-embedding-001`, `gemini-embedding-2` does not use explicit `taskType` parameters; any task
+orientation or semantic framing is embedded directly in text prompt prefixes when necessary (e.g. `fact: ...`
+or `entity: ...`).
 
 ## 4. Pipeline Stages
 
 ### 4.1 Ingestion and parsing
-- Stream the upload to disk, never buffer the whole PDF in the API process. Page extraction is a
-  lazy sequential stream: `for (i = 1..numPages)` → `getPage(i)` → `getTextContent()` → insert the
-  `page_chunks` row immediately → `page.cleanup()` → `redis.publish(doc:status, {current, total})`.
-  Memory stays O(1 page). Never `Promise.all()` pages. Upsert on
+- Upload handling: Elysia's multipart body parser buffers incoming files up to the bounded `MAX_UPLOAD_MB`
+  limit (100MB default), preventing memory exhaustion while validating and writing the file. Page extraction
+  in the worker is a lazy sequential stream: `for (i = 1..numPages)` → `getPage(i)` → `getTextContent()` →
+  insert the `page_chunks` row immediately → `page.cleanup()` → `redis.publish(doc:status, {current, total})`.
+  Worker extraction memory stays strictly O(1 page). Never `Promise.all()` pages. Upsert on
   `(documentId, pageNumber, chunkIndex)` so a crashed job resumes without duplicates; wrap each
   page in try/catch so one bad page emits a `pipeline_events` warning and continues instead of
   failing the document. Chunk by page or logical section, not fixed token windows, so evidence
