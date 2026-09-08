@@ -154,6 +154,25 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
       // percentage); the rule layer must escalate, never emit a corroboration.
       expect(res.escalate).toBe(true);
     });
+
+    it("corroborates equivalent amounts with differing explicit multipliers ($1.5B vs $1500M)", () => {
+      const factA = {
+        id: "f1",
+        predicate: "revenue",
+        value: "$1.5B",
+      };
+      const factB = {
+        id: "f2",
+        predicate: "revenue",
+        value: "$1500M",
+      };
+
+      const res = ruleReconcile(factA, factB);
+      expect(res.escalate).toBe(false);
+      if (!res.escalate) {
+        expect(res.decision.relationType).toBe("corroborates");
+      }
+    });
   });
 
   describe("U5: TimeScope normalization and comparison", () => {
@@ -182,6 +201,37 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
         predicate: "revenue",
         timeScope: "FY2023",
         value: "$3.5M",
+      };
+      const factB = {
+        id: "f2",
+        predicate: "revenue",
+        timeScope: "FY2024",
+        value: "$4.2M",
+      };
+
+      const res = ruleReconcile(factA, factB);
+      expect(res.escalate).toBe(false);
+      if (!res.escalate) {
+        expect(res.decision.relationType).toBe("reconciled");
+        expect(res.decision.explanation).toContain("FY2023");
+        expect(res.decision.explanation).toContain("FY2024");
+      }
+    });
+
+    it("normalizes date prefix without matching range and derives year (2024-03-31 -> 2024)", () => {
+      expect(normalizeTimeScope("2024-03-31")).toBe("2024");
+    });
+
+    it("normalizes 1900s 2-digit range using century pivot (1998-99 -> FY1999)", () => {
+      expect(normalizeTimeScope("1998-99")).toBe("FY1999");
+    });
+
+    it("reconciles identical values across differing timeScopes rather than corroborating", () => {
+      const factA = {
+        id: "f1",
+        predicate: "revenue",
+        timeScope: "FY2023",
+        value: "$4.2M",
       };
       const factB = {
         id: "f2",
@@ -286,6 +336,30 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
       const comp = compareQualifiers(qualA, qualB);
       expect(comp.identical).toBe(true);
       expect(comp.differingKeys.length).toBe(0);
+    });
+
+    it("serializes non-string qualifier values cleanly without [object Object]", () => {
+      const factA = {
+        id: "f1",
+        predicate: "settings",
+        qualifiers: { tags: ["enterprise", "active"] },
+        timeScope: "FY2024",
+        value: "100",
+      };
+      const factB = {
+        id: "f2",
+        predicate: "settings",
+        qualifiers: { tags: ["consumer"] },
+        timeScope: "FY2024",
+        value: "200",
+      };
+
+      const res = ruleReconcile(factA, factB);
+      expect(res.escalate).toBe(false);
+      if (!res.escalate) {
+        expect(res.decision.explanation).not.toContain("[object Object]");
+        expect(res.decision.explanation).toContain('["enterprise","active"]');
+      }
     });
   });
 

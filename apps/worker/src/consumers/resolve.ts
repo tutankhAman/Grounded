@@ -397,8 +397,12 @@ export const processResolveJob = async (
 
     try {
       await addReconcileJob({ documentId });
-    } catch {
-      // Ignored: best-effort queueing
+    } catch (queueErr) {
+      console.error(
+        `[Resolve] Failed to queue reconcile job for document ${documentId}:`,
+        queueErr
+      );
+      throw queueErr;
     }
 
     return {

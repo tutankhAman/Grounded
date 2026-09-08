@@ -1,6 +1,8 @@
 export interface ParsedNumber {
   currency?: string | null;
+  hasExplicitMultiplier?: boolean;
   multiplier: number;
+  physicalUnit?: string | null;
   rawUnit?: string | null;
   unit?: string | null;
   value: number;
@@ -156,7 +158,20 @@ const detectMultiplier = (
 
   return { multiplier: 1, rawUnit: null };
 };
-const RANGE_SCOPE_REGEX = /(?:FY\s*)?(\d{2,4})[-–/](\d{2,4})/i;
+
+const expandTwoDigitYear = (yy: string, referenceCentury?: string): string => {
+  if (yy.length !== 2) {
+    return yy;
+  }
+  if (referenceCentury && referenceCentury.length === 2) {
+    return `${referenceCentury}${yy}`;
+  }
+  const n = Number(yy);
+  return n >= 70 ? `19${yy}` : `20${yy}`;
+};
+
+const RANGE_SCOPE_REGEX =
+  /(?:(?:FY|FISCAL(?:\s+YEAR)?)\s*['’]?(\d{2,4})|(?:\b(19\d{2}|20\d{2})))\s*[-–/]\s*['’]?(\d{2,4})\b(?!\s*[-–/]\s*\d)/i;
 const FY_SCOPE_REGEX = /(?:FY|FISCAL(?:\s+YEAR)?)\s*['’]?(\d{2,4})/i;
 const QTR_SCOPE_REGEX = /([1-4]Q|Q[1-4])\s*(?:FY\s*)?['’]?(\d{2,4})/i;
 const CY_SCOPE_REGEX = /CY\s*(\d{4})/i;
@@ -243,10 +258,23 @@ export const parseNumeric = (
   }
 
   const finalValue = isPercent ? rawNum : rawNum * detectedMultiplier;
+  const hasExplicitMultiplier = detectedRawUnit !== null;
+
+  let physicalUnit: string | null = null;
+  if (isPercent) {
+    physicalUnit = "percent";
+  } else if (unitHint) {
+    const trimmedHint = unitHint.trim().toLowerCase();
+    if (!MULTIPLIERS[trimmedHint]) {
+      physicalUnit = unitHint.trim();
+    }
+  }
 
   return {
     currency: detectedCurrency,
+    hasExplicitMultiplier,
     multiplier: detectedMultiplier,
+    physicalUnit,
     rawUnit: detectedRawUnit ?? unitHint ?? null,
     unit: isPercent ? "percent" : (detectedRawUnit ?? unitHint ?? null),
     value: finalValue,
@@ -263,11 +291,8 @@ export const convertUnits = (
   numA: ParsedNumber,
   numB: ParsedNumber
 ): { equal: boolean; relativeDiff: number } => {
-  const unitA = numA.unit ?? null;
-  const unitB = numB.unit ?? null;
-
-  const isPercentA = unitA === "percent";
-  const isPercentB = unitB === "percent";
+  const isPercentA = numA.unit === "percent" || numA.physicalUnit === "percent";
+  const isPercentB = numB.unit === "percent" || numB.physicalUnit === "percent";
 
   // A percentage can never be reconciled with a non-percentage value: "$50" vs
   // "50%" both parse to 50 but are categorically different facts. Escalate.
@@ -275,11 +300,28 @@ export const convertUnits = (
     return { equal: false, relativeDiff: Number.POSITIVE_INFINITY };
   }
 
-  // Units are incompatible when both are present, differ, and are not the
-  // percent case (e.g. "million" vs "billion"). "M" vs an unlabeled absolute
-  // value is fine — that is exactly the unit-normalization we want to allow.
-  if (unitA && unitB && unitA !== unitB) {
+  // Physical units mismatch check:
+  // If distinct physical units are present on both operands, they are incompatible
+  // (e.g. "kg" vs "meters").
+  const physA = numA.physicalUnit ?? null;
+  const physB = numB.physicalUnit ?? null;
+  if (physA && physB && physA !== physB) {
     return { equal: false, relativeDiff: Number.POSITIVE_INFINITY };
+  }
+
+  // Multiplier tokens / unit compatibility:
+  // When both operands have explicit multipliers (e.g. "billion" vs "M"), differing
+  // spellings/scales are already reflected in .value, so they can be compared numerically.
+  // In other cases where units are specified on both and differ, they are incompatible.
+  const unitA = numA.unit ?? null;
+  const unitB = numB.unit ?? null;
+  if (unitA && unitB && unitA !== unitB) {
+    const bothHaveExplicitMultiplier = Boolean(
+      numA.hasExplicitMultiplier && numB.hasExplicitMultiplier
+    );
+    if (!bothHaveExplicitMultiplier) {
+      return { equal: false, relativeDiff: Number.POSITIVE_INFINITY };
+    }
   }
 
   const a = numA.value;
@@ -310,17 +352,26 @@ export const normalizeTimeScope = (scope?: string | null): string => {
 
   // Multi-year / fiscal ranges: "2023-24", "2023-2024", "FY23-24" -> "FY2024"
   const rangeMatch = clean.match(RANGE_SCOPE_REGEX);
-  if (rangeMatch?.[2]) {
-    const [, , endPart] = rangeMatch;
-    const year = endPart.length === 2 ? `20${endPart}` : endPart;
-    return `FY${year}`;
+  if (rangeMatch) {
+    const [, fyPart, yrPart, endPart] = rangeMatch;
+    const startPart = fyPart ?? yrPart;
+    if (startPart && endPart) {
+      const startYear =
+        startPart.length === 2 ? expandTwoDigitYear(startPart) : startPart;
+      const referenceCentury = startYear.slice(0, 2);
+      const endYear =
+        endPart.length === 2
+          ? expandTwoDigitYear(endPart, referenceCentury)
+          : endPart;
+      return `FY${endYear}`;
+    }
   }
 
   // FY with 2 or 4 digits: "FY 24", "FY2024", "FISCAL 2024" -> "FY2024"
   const fyMatch = clean.match(FY_SCOPE_REGEX);
   if (fyMatch?.[1]) {
     const [, yr] = fyMatch;
-    const fullYear = yr.length === 2 ? `20${yr}` : yr;
+    const fullYear = expandTwoDigitYear(yr);
     return `FY${fullYear}`;
   }
 
@@ -329,7 +380,7 @@ export const normalizeTimeScope = (scope?: string | null): string => {
   if (qtrMatch?.[1] && qtrMatch?.[2]) {
     const [qtrToken, qtrYr] = [qtrMatch[1], qtrMatch[2]];
     const qtr = qtrToken.startsWith("Q") ? qtrToken : `Q${qtrToken[0]}`;
-    const fullYear = qtrYr.length === 2 ? `20${qtrYr}` : qtrYr;
+    const fullYear = expandTwoDigitYear(qtrYr);
     return `${qtr}-FY${fullYear}`;
   }
 
@@ -444,10 +495,24 @@ export const compareQualifiers = (
   };
 };
 
+const formatQualifierValue = (val: unknown): string => {
+  if (typeof val === "string") {
+    return val;
+  }
+  if (val === null || val === undefined) {
+    return String(val);
+  }
+  try {
+    return JSON.stringify(val);
+  } catch {
+    return String(val);
+  }
+};
+
 /**
  * Deterministic rule-based fact reconciliation pre-filter.
  * Order matters (first match wins):
- * 1. Exact value match -> corroborates
+ * 1. Exact value match -> corroborates (requires compatible time scopes)
  * 2. Unit-convertible equality -> corroborates (or reconciled if currencies differ)
  * 3. Time scope differs with differing values -> reconciled
  * 4. Currency differs with same amount -> reconciled
@@ -466,10 +531,18 @@ export const ruleReconcile = (
   const rawTrimA = factA.rawValue?.trim().toLowerCase();
   const rawTrimB = factB.rawValue?.trim().toLowerCase();
 
-  // 1. Exact value match
+  const timeComp = compareTimeScope(factA.timeScope, factB.timeScope);
+  const hasDifferentPeriods = !(
+    timeComp.bothMissing ||
+    timeComp.oneMissing ||
+    timeComp.sameScope
+  );
+
+  // 1. Exact value match (requires compatible time scopes)
   if (
-    (normValA !== "" && normValA === normValB) ||
-    (rawTrimA !== undefined && rawTrimA !== "" && rawTrimA === rawTrimB)
+    !hasDifferentPeriods &&
+    ((normValA !== "" && normValA === normValB) ||
+      (rawTrimA !== undefined && rawTrimA !== "" && rawTrimA === rawTrimB))
   ) {
     return {
       decision: {
@@ -489,7 +562,7 @@ export const ruleReconcile = (
   if (numA && numB) {
     const { equal } = convertUnits(numA, numB);
 
-    if (equal) {
+    if (equal && !hasDifferentPeriods) {
       // 4. Check currency delta on equal amounts
       if (numA.currency && numB.currency && numA.currency !== numB.currency) {
         return {
@@ -516,8 +589,7 @@ export const ruleReconcile = (
   }
 
   // 3. Time scope comparison
-  const timeComp = compareTimeScope(factA.timeScope, factB.timeScope);
-  if (!(timeComp.bothMissing || timeComp.oneMissing || timeComp.sameScope)) {
+  if (hasDifferentPeriods) {
     return {
       decision: {
         confidence: 0.9,
@@ -533,10 +605,12 @@ export const ruleReconcile = (
   const qualComp = compareQualifiers(factA.qualifiers, factB.qualifiers);
   const [diff] = qualComp.differingKeys;
   if (diff) {
+    const formattedValA = formatQualifierValue(diff.valA);
+    const formattedValB = formatQualifierValue(diff.valB);
     return {
       decision: {
         confidence: 0.9,
-        explanation: `Values differ ("${factA.value}" vs "${factB.value}") due to different ${diff.key} qualifier: "${diff.valA}" vs "${diff.valB}".`,
+        explanation: `Values differ ("${factA.value}" vs "${factB.value}") due to different ${diff.key} qualifier: "${formattedValA}" vs "${formattedValB}".`,
         method: "rule",
         relationType: "reconciled",
       },

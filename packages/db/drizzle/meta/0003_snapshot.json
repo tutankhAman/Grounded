@@ -649,7 +649,29 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "relationships_fact_a_b_idx": {
+          "name": "relationships_fact_a_b_idx",
+          "columns": [
+            {
+              "expression": "fact_a_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fact_b_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "relationships_fact_a_id_facts_id_fk": {
           "name": "relationships_fact_a_id_facts_id_fk",

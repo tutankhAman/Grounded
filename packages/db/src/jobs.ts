@@ -132,9 +132,9 @@ export const getReconcileThresholds = (
   overrides?: Partial<ReconcileThresholds>
 ): ReconcileThresholds => ({
   judgeModel:
-    overrides?.judgeModel ??
-    process.env.JUDGE_MODEL ??
-    process.env.TEXT_MODEL ??
+    overrides?.judgeModel?.trim() ||
+    process.env.JUDGE_MODEL?.trim() ||
+    process.env.TEXT_MODEL?.trim() ||
     DEFAULT_RECONCILE_THRESHOLDS.judgeModel,
   judgeThinkingBudget:
     overrides?.judgeThinkingBudget ??
