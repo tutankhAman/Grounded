@@ -11,12 +11,22 @@ import {
   type SQL,
 } from "@grounded/db";
 import { Elysia, t } from "elysia";
+import { parsePagination } from "../lib/pagination";
 
 export const factRoutes = new Elysia({ prefix: "/facts" }).get(
   "/",
   async ({ query }) => {
-    const { documentId: docId, entityId, limit: queryLimit, predicate } = query;
-    const limit = Math.max(1, Math.min(100, Number(queryLimit) || 50));
+    const {
+      documentId: docId,
+      entityId,
+      limit: queryLimit,
+      page: queryPage,
+      predicate,
+    } = query;
+    const { limit, offset } = parsePagination(
+      { limit: queryLimit, page: queryPage },
+      { defaultLimit: 50 }
+    );
 
     const conditions: SQL[] = [];
     if (docId) {
@@ -66,7 +76,8 @@ export const factRoutes = new Elysia({ prefix: "/facts" }).get(
 
     const data = await queryBuilder
       .orderBy(asc(facts.sourcePage), desc(facts.extractedAt))
-      .limit(limit);
+      .limit(limit)
+      .offset(offset);
 
     return { data, total };
   },
@@ -75,6 +86,7 @@ export const factRoutes = new Elysia({ prefix: "/facts" }).get(
       documentId: t.Optional(t.String()),
       entityId: t.Optional(t.String()),
       limit: t.Optional(t.String()),
+      page: t.Optional(t.String()),
       predicate: t.Optional(t.String()),
     }),
   }

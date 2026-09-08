@@ -12,6 +12,7 @@ import {
   sql,
 } from "@grounded/db";
 import { Elysia, t } from "elysia";
+import { parsePagination } from "../lib/pagination";
 import { addParseJob } from "../lib/queue";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../../../");
@@ -213,9 +214,9 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
         return { error: `Document ${id} not found` };
       }
 
-      const page = Math.max(1, Number(query.page) || 1);
-      const limit = Math.max(1, Math.min(100, Number(query.limit) || 50));
-      const offset = (page - 1) * limit;
+      const { limit, offset, page } = parsePagination(query, {
+        defaultLimit: 50,
+      });
 
       const [totalCountRes] = await db
         .select({ count: sql<number>`count(*)::int` })
