@@ -108,3 +108,19 @@ export const ReconciliationResultSchema = z.object({
 });
 
 export type ReconciliationResult = z.infer<typeof ReconciliationResultSchema>;
+
+export const EntityConfirmSchema = z.object({
+  reasoning: z
+    .string()
+    .min(1)
+    .describe(
+      "One sentence of reasoning explaining why they are or are not the same entity"
+    ),
+  same: z
+    .boolean()
+    .describe(
+      "Whether Entity A and Entity B refer to the same real-world entity"
+    ),
+});
+
+export type EntityConfirm = z.infer<typeof EntityConfirmSchema>;
