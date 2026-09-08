@@ -1,10 +1,16 @@
 import { resolve } from "node:path";
-import { type ExtractJob, PARSE_QUEUE, type ParseJob } from "@grounded/db";
+import {
+  type ExtractJob,
+  PARSE_QUEUE,
+  type ParseJob,
+  type ResolveJob,
+} from "@grounded/db";
 import { Worker } from "bullmq";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import { processExtractJob } from "./consumers/extract";
 import { processParseJob, pubRedis } from "./consumers/parse";
+import { processResolveJob } from "./consumers/resolve";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
 
@@ -14,7 +20,7 @@ const connection = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
 
-export const documentWorker = new Worker<ParseJob | ExtractJob>(
+export const documentWorker = new Worker<ParseJob | ExtractJob | ResolveJob>(
   PARSE_QUEUE,
   async (job) => {
     console.log(
@@ -31,6 +37,13 @@ export const documentWorker = new Worker<ParseJob | ExtractJob>(
       const result = await processExtractJob(job.data as ExtractJob);
       console.log(
         `[Worker] Finished job ${job.id} — extracted ${result.factsExtracted} facts (${result.chunksFailed} chunks failed)`
+      );
+      return result;
+    }
+    if (job.name === "resolve-document") {
+      const result = await processResolveJob(job.data as ResolveJob);
+      console.log(
+        `[Worker] Finished job ${job.id} — resolved ${result.entitiesResolved} entities (${result.factsLinked} facts linked)`
       );
       return result;
     }

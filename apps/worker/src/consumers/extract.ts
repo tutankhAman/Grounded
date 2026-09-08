@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import {
+  addResolveJob,
   asc,
   type BatchExtractedFact,
   db,
@@ -698,7 +699,13 @@ async function persistExtractedFacts(
       fact.qualifiers
     )
       ? Object.fromEntries(fact.qualifiers.map((q) => [q.key, q.value]))
-      : ((fact.qualifiers as Record<string, unknown> | null) ?? {});
+      : { ...((fact.qualifiers as Record<string, unknown> | null) ?? {}) };
+
+    qualifiersRecord._entity = {
+      context: fact.entity.context,
+      name: fact.entity.name,
+      type: fact.entity.type,
+    };
 
     return {
       confidence: fact.confidence,
@@ -883,6 +890,12 @@ export const processExtractJob = async (
     .where(eq(documents.id, documentId));
 
   publishProgress(documentId, totalChunks, totalChunks, "extracted");
+
+  try {
+    await addResolveJob({ documentId });
+  } catch {
+    // Ignored: best-effort queueing
+  }
 
   return {
     chunksFailed,
