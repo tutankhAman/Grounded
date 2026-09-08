@@ -9,8 +9,8 @@ mock.module("../lib/queue", () => ({
   }),
 }));
 
-// Import app pure after queue mock is registered
-import { app } from "../index";
+// Dynamically import app after queue mock is registered to prevent ESM hoisting
+const { app } = await import("../index");
 
 // Gate database tests if Postgres is not reachable
 let dbAvailable = false;
