@@ -29,17 +29,19 @@ export const validateQuote = (
   return sourceText.includes(quote);
 };
 
-export interface QuoteValidationResult {
-  fact: ExtractedFact;
+export interface QuoteValidationResult<
+  T extends ExtractedFact = ExtractedFact,
+> {
+  fact: T;
   sourceQuoteValid: boolean;
   visionOnly: boolean;
 }
 
-export const applyQuoteValidation = (
-  fact: ExtractedFact,
+export const applyQuoteValidation = <T extends ExtractedFact>(
+  fact: T,
   sourceText: string,
   isVisionOnly = false
-): QuoteValidationResult => {
+): QuoteValidationResult<T> => {
   if (isVisionOnly) {
     const qualifiers: Record<string, unknown> = {
       ...(fact.qualifiers ?? {}),

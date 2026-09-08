@@ -7,7 +7,6 @@ import {
   type BatchExtractedFact,
   BatchExtractionResultSchema,
   EMBEDDING_DIM,
-  type ExtractedFact,
 } from "@grounded/db";
 import { embedMany, generateObject, generateText } from "ai";
 import { rateLimitedFetch } from "../lib/rate-limit";
@@ -90,6 +89,7 @@ export const l2Normalize = (vector: number[]): number[] => {
 };
 
 export interface ExtractBatchOptions {
+  forceFailure?: boolean;
   systemPrompt?: string;
 }
 
@@ -101,6 +101,9 @@ export const extractBatch = async (
   pages: PageBatchItem[],
   options?: ExtractBatchOptions
 ): Promise<BatchExtractedFact[]> => {
+  if (options?.forceFailure) {
+    throw new ExtractionFailedError("Forced extraction failure for testing.");
+  }
   if (pages.length === 0) {
     return [];
   }
@@ -143,12 +146,12 @@ export const extractBatch = async (
         temperature: 0,
       });
 
-      const fallback = parseFallbackBatchOutput(rawResult.text);
-      if (fallback.ok) {
-        return fallback.facts;
+      const parsed = parseFallbackBatchOutput(rawResult.text);
+      if (parsed.ok) {
+        return parsed.facts;
       }
       throw new ExtractionFailedError(
-        `Batch fallback JSON parse failed: ${fallback.error}`,
+        `Failed to parse batch fallback output: ${parsed.error}`,
         { cause: schemaErr, rawOutput: rawResult.text }
       );
     } catch (fallbackErr: unknown) {
@@ -161,7 +164,6 @@ export const extractBatch = async (
           : String(fallbackErr);
       throw new ExtractionFailedError(`Batch extraction failed: ${message}`, {
         cause: fallbackErr,
-        rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
       });
     }
   }
@@ -173,21 +175,100 @@ export const extractBatch = async (
  */
 export const extractTextChunk = async (
   rawText: string,
-  options?: { systemPrompt?: string }
-): Promise<ExtractedFact[]> => {
+  options?: ExtractBatchOptions
+): Promise<BatchExtractedFact[]> => {
   const batch = await extractBatch([{ pageNumber: 1, text: rawText }], options);
   return batch;
 };
 
+function normalizeVisionArgs(
+  imagesOrDataUrl: string[] | string,
+  pageNumbersOrHint?: number[] | string,
+  maybeHint?: string
+): { hint?: string; images: string[]; pageNumbers: number[] } {
+  if (typeof imagesOrDataUrl === "string") {
+    return {
+      hint:
+        typeof pageNumbersOrHint === "string" ? pageNumbersOrHint : maybeHint,
+      images: [imagesOrDataUrl],
+      pageNumbers: [1],
+    };
+  }
+  return {
+    hint: maybeHint,
+    images: imagesOrDataUrl,
+    pageNumbers: Array.isArray(pageNumbersOrHint) ? pageNumbersOrHint : [1],
+  };
+}
+
+async function handleVisionFallback(
+  model: Parameters<typeof generateText>[0]["model"],
+  contentParts: Parameters<
+    typeof generateText
+  >[0]["messages"][number]["content"],
+  schemaErr: unknown
+): Promise<BatchExtractedFact[]> {
+  try {
+    const rawResult = await generateText({
+      maxRetries: 2,
+      messages: [
+        {
+          content: contentParts,
+          role: "user",
+        },
+      ],
+      model,
+      system: EXTRACTION_SYSTEM_PROMPT,
+      temperature: 0,
+    });
+
+    const fallback = parseFallbackBatchOutput(rawResult.text);
+    if (fallback.ok) {
+      return fallback.facts;
+    }
+    throw new ExtractionFailedError(
+      `Vision fallback JSON parse failed: ${fallback.error}`,
+      { cause: schemaErr, rawOutput: rawResult.text }
+    );
+  } catch (fallbackErr: unknown) {
+    if (fallbackErr instanceof ExtractionFailedError) {
+      throw fallbackErr;
+    }
+    const message =
+      fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+    throw new ExtractionFailedError(
+      `Vision batch extraction failed: ${message}`,
+      {
+        cause: fallbackErr,
+        rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
+      }
+    );
+  }
+}
+
 /**
- * Multi-image vision extraction with ordering instructions.
- * Takes multiple rendered page images and their corresponding page numbers.
+ * Multi-image or single-image vision extraction with ordering instructions.
  */
-export const extractVisionPage = async (
+export function extractVisionPage(
+  imageDataUrl: string,
+  rawTextHint?: string
+): Promise<BatchExtractedFact[]>;
+export function extractVisionPage(
   images: string[],
   pageNumbers: number[],
   hint?: string
-): Promise<BatchExtractedFact[]> => {
+): Promise<BatchExtractedFact[]>;
+export async function extractVisionPage(
+  imagesOrDataUrl: string[] | string,
+  pageNumbersOrHint?: number[] | string,
+  maybeHint?: string
+): Promise<BatchExtractedFact[]> {
+  const { hint, images, pageNumbers } = normalizeVisionArgs(
+    imagesOrDataUrl,
+    pageNumbersOrHint,
+    maybeHint
+  );
+
   if (images.length === 0 || pageNumbers.length === 0) {
     return [];
   }
@@ -238,46 +319,9 @@ export const extractVisionPage = async (
     });
     return result.object.facts;
   } catch (schemaErr: unknown) {
-    try {
-      const rawResult = await generateText({
-        maxRetries: 2,
-        messages: [
-          {
-            content: contentParts,
-            role: "user",
-          },
-        ],
-        model,
-        system: EXTRACTION_SYSTEM_PROMPT,
-        temperature: 0,
-      });
-
-      const fallback = parseFallbackBatchOutput(rawResult.text);
-      if (fallback.ok) {
-        return fallback.facts;
-      }
-      throw new ExtractionFailedError(
-        `Vision fallback JSON parse failed: ${fallback.error}`,
-        { cause: schemaErr, rawOutput: rawResult.text }
-      );
-    } catch (fallbackErr: unknown) {
-      if (fallbackErr instanceof ExtractionFailedError) {
-        throw fallbackErr;
-      }
-      const message =
-        fallbackErr instanceof Error
-          ? fallbackErr.message
-          : String(fallbackErr);
-      throw new ExtractionFailedError(
-        `Vision batch extraction failed: ${message}`,
-        {
-          cause: fallbackErr,
-          rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
-        }
-      );
-    }
+    return await handleVisionFallback(model, contentParts, schemaErr);
   }
-};
+}
 
 const embeddingCache = new Map<string, number[]>();
 const MAX_CACHE_SIZE = 5000;
