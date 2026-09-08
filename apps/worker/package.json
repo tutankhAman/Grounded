@@ -10,10 +10,13 @@
   },
   "dependencies": {
     "@grounded/db": "workspace:*",
+    "@napi-rs/canvas": "^1.0.8",
     "bullmq": "^5.41.6",
+    "canvas": "^3.2.3",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
-    "ioredis": "^5.6.0"
+    "ioredis": "^5.6.0",
+    "unpdf": "^1.8.1"
   },
   "devDependencies": {
     "typescript": "^5.8.2"
