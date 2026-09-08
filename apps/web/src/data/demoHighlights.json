@@ -1,0 +1,22 @@
+{
+  "corroboration": {
+    "relationshipId": "",
+    "label": "Corroborated fact across documents",
+    "description": "Consistent metric verified across multiple independent filings"
+  },
+  "contradiction": {
+    "relationshipId": "",
+    "label": "Contradiction / Direct disagreement",
+    "description": "Conflicting metrics or statuses flagged by cross-document reconciliation"
+  },
+  "reconciled": {
+    "relationshipId": "",
+    "label": "Context-explained conflict (Reconciled)",
+    "description": "Apparent conflict explained by differing fiscal years, accounting standards, or currency"
+  },
+  "failure": {
+    "factId": "",
+    "label": "Known extraction failure",
+    "description": "Edge-case extraction documented for system auditability and transparency"
+  }
+}
