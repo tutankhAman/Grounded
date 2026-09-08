@@ -11,6 +11,7 @@
   "dependencies": {
     "@elysiajs/cors": "^1.2.0",
     "@grounded/db": "workspace:*",
+    "bullmq": "^5.41.6",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
     "elysia": "^1.2.25",
