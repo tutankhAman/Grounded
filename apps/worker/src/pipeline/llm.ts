@@ -97,10 +97,43 @@ export const l2Normalize = (vector: number[]): number[] => {
   return vector.map((v) => v / norm);
 };
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface ExtractBatchOptions {
   forceFailure?: boolean;
+  onUsage?: (usage: TokenUsage) => void;
   systemPrompt?: string;
 }
+
+export const normalizeUsage = (usage: {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+}): TokenUsage => ({
+  inputTokens: usage.inputTokens ?? 0,
+  outputTokens: usage.outputTokens ?? 0,
+  totalTokens:
+    usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+});
+
+const reportUsage = (
+  options: ExtractBatchOptions | undefined,
+  usage:
+    | {
+        inputTokens?: number | null;
+        outputTokens?: number | null;
+        totalTokens?: number | null;
+      }
+    | undefined
+): void => {
+  if (options?.onUsage && usage) {
+    options.onUsage(normalizeUsage(usage));
+  }
+};
 
 /**
  * Extracts facts across a batch of pages using native structured output.
@@ -123,7 +156,7 @@ export const extractBatch = async (
   const systemPrompt = options?.systemPrompt ?? EXTRACTION_SYSTEM_PROMPT;
   const thinkingBudget = Number(process.env.THINKING_BUDGET ?? 0);
 
-  const promptText = `Extract all facts from the following document pages. Each fact MUST include the 1-based pageNumber corresponding to the page section header (e.g. --- PAGE X ---) where the fact is stated:\n\n${formatBatchPrompt(
+  const promptText = `Extract the meaningful facts from the following document pages. Each fact MUST include the 1-based pageNumber corresponding to the page section header (e.g. --- PAGE X ---) where the fact is stated:\n\n${formatBatchPrompt(
     pages
   )}`;
 
@@ -144,6 +177,7 @@ export const extractBatch = async (
       system: systemPrompt,
       temperature: 0,
     });
+    reportUsage(options, result.usage);
     return result.object.facts;
   } catch (schemaErr: unknown) {
     try {
@@ -154,6 +188,7 @@ export const extractBatch = async (
         system: systemPrompt,
         temperature: 0,
       });
+      reportUsage(options, rawResult.usage);
 
       const parsed = parseFallbackBatchOutput(rawResult.text);
       if (parsed.ok) {
@@ -217,7 +252,8 @@ type VisionContentPart =
 async function handleVisionFallback(
   model: Parameters<typeof generateText>[0]["model"],
   contentParts: VisionContentPart[],
-  schemaErr: unknown
+  schemaErr: unknown,
+  options?: ExtractBatchOptions
 ): Promise<BatchExtractedFact[]> {
   try {
     const rawResult = await generateText({
@@ -232,6 +268,7 @@ async function handleVisionFallback(
       system: EXTRACTION_SYSTEM_PROMPT,
       temperature: 0,
     });
+    reportUsage(options, rawResult.usage);
 
     const fallback = parseFallbackBatchOutput(rawResult.text);
     if (fallback.ok) {
@@ -262,22 +299,33 @@ async function handleVisionFallback(
  */
 export function extractVisionPage(
   imageDataUrl: string,
-  rawTextHint?: string
+  rawTextHint?: string,
+  options?: ExtractBatchOptions
 ): Promise<BatchExtractedFact[]>;
 export function extractVisionPage(
   images: string[],
   pageNumbers: number[],
-  hint?: string
+  hint?: string,
+  options?: ExtractBatchOptions
 ): Promise<BatchExtractedFact[]>;
 export async function extractVisionPage(
   imagesOrDataUrl: string[] | string,
   pageNumbersOrHint?: number[] | string,
-  maybeHint?: string
+  maybeHint?: string | ExtractBatchOptions,
+  maybeOptions?: ExtractBatchOptions
 ): Promise<BatchExtractedFact[]> {
+  // Single-image overload is (dataUrl, hint?, options?); array overload is
+  // (images, pageNumbers, hint?, options?). At runtime the trailing options of
+  // the single-image form land in maybeHint, so detect the object shape.
+  const options =
+    maybeOptions ??
+    (typeof maybeHint === "object" && maybeHint !== null
+      ? (maybeHint as ExtractBatchOptions)
+      : undefined);
   const { hint, images, pageNumbers } = normalizeVisionArgs(
     imagesOrDataUrl,
     pageNumbersOrHint,
-    maybeHint
+    typeof maybeHint === "string" ? maybeHint : undefined
   );
 
   if (images.length === 0 || pageNumbers.length === 0) {
@@ -294,8 +342,8 @@ export async function extractVisionPage(
     .join(", ");
 
   const promptText = hint
-    ? `Extract all facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.\nContext text:\n${hint}`
-    : `Extract all facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.`;
+    ? `Extract the meaningful facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.\nContext text:\n${hint}`
+    : `Extract the meaningful facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.`;
 
   const contentParts: Array<
     | { type: "file"; data: string; mediaType: string }
@@ -328,9 +376,10 @@ export async function extractVisionPage(
       system: EXTRACTION_SYSTEM_PROMPT,
       temperature: 0,
     });
+    reportUsage(options, result.usage);
     return result.object.facts;
   } catch (schemaErr: unknown) {
-    return await handleVisionFallback(model, contentParts, schemaErr);
+    return await handleVisionFallback(model, contentParts, schemaErr, options);
   }
 }
 

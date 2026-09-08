@@ -6,12 +6,15 @@ import {
   buildEmbeddingInput,
   compactText,
   decideFactType,
+  duplicateTripleRate,
   EXTRACTION_SYSTEM_PROMPT,
   findRepeatedStrings,
   hashPage,
   packPages,
   parseFallbackOutput,
+  quoteLengthBucket,
   splitBatch,
+  summarizeQuoteLengths,
   validateBatchResult,
   validateQuote,
 } from "./extractor";
@@ -189,7 +192,7 @@ describe("extractor pure layer unit tests", () => {
     expect(input).toBe("fact: Delhivery quarterly_revenue 20760000000");
   });
 
-  test("8. EXTRACTION_SYSTEM_PROMPT contains all 6 required rules", () => {
+  test("8. EXTRACTION_SYSTEM_PROMPT contains all required rules (grounding + selectivity)", () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain("Rules:");
     expect(EXTRACTION_SYSTEM_PROMPT).toContain("explicitly stated");
     expect(EXTRACTION_SYSTEM_PROMPT).toContain("verbatim substring");
@@ -197,6 +200,18 @@ describe("extractor pure layer unit tests", () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain("factTypeDescription");
     expect(EXTRACTION_SYSTEM_PROMPT).toContain("confidence below 0.7");
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('{"facts": []}');
+    // Selectivity rules (conservative): minimal-span quotes, one fact per
+    // (metric, scope, document), fragment skipping, both fact kinds covered.
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("minimal span");
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain(
+      "One fact per (metric, scope, document)"
+    );
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("always keep both");
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain(
+      "Skip fragments and restatements"
+    );
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("semantic facts");
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain("emit the fact once");
   });
 
   test("9. packPages groups pages preserving order and handles oversize loners and small docs", () => {
@@ -277,5 +292,59 @@ describe("extractor pure layer unit tests", () => {
     const [singleLeft, singleRight] = splitBatch(single);
     expect(singleLeft).toEqual([1]);
     expect(singleRight).toEqual([]);
+  });
+
+  test("14. quoteLengthBucket + summarizeQuoteLengths bucket observed lengths (never enforced)", () => {
+    expect(quoteLengthBucket(50)).toBe("0-100");
+    expect(quoteLengthBucket(100)).toBe("0-100");
+    expect(quoteLengthBucket(400)).toBe("101-400");
+    expect(quoteLengthBucket(1000)).toBe("401-1000");
+    expect(quoteLengthBucket(1001)).toBe("1000+");
+
+    const summary = summarizeQuoteLengths([
+      "short quote",
+      "Revenue grew.",
+      "x".repeat(500),
+      "y".repeat(2000),
+    ]);
+    expect(summary).toEqual({
+      "0-100": 2,
+      "101-400": 0,
+      "401-1000": 1,
+      "1000+": 1,
+    });
+    expect(summarizeQuoteLengths([])).toEqual({
+      "0-100": 0,
+      "101-400": 0,
+      "401-1000": 0,
+      "1000+": 0,
+    });
+  });
+
+  test("15. duplicateTripleRate scores over-extraction (selectivity scoreboard)", () => {
+    const facts = [
+      { predicate: "total_revenue", timeScope: "FY2023", value: "4200M" },
+      { predicate: "total_revenue", timeScope: "FY2023", value: "4200M" },
+      { predicate: "total_revenue", timeScope: "FY2024", value: "4800M" },
+      { predicate: "net_income", timeScope: null, value: "890M" },
+    ];
+    const { duplicates, rate, total } = duplicateTripleRate(facts);
+    expect(total).toBe(4);
+    expect(duplicates).toBe(1);
+    expect(rate).toBe(0.25);
+
+    // Same metric, different scope is NOT a duplicate (reconciled-case material).
+    const scoped = duplicateTripleRate([
+      { predicate: "total_revenue", timeScope: "FY2022", value: "3750M" },
+      { predicate: "total_revenue", timeScope: "FY2023", value: "4200M" },
+    ]);
+    expect(scoped.duplicates).toBe(0);
+    expect(scoped.rate).toBe(0);
+
+    expect(duplicateTripleRate([])).toEqual({
+      duplicates: 0,
+      rate: 0,
+      total: 0,
+    });
   });
 });

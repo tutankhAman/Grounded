@@ -12,7 +12,12 @@ import {
 } from "@grounded/db";
 import dotenv from "dotenv";
 import Redis from "ioredis";
-import { applyQuoteValidation, validateQuote } from "../pipeline/extractor";
+import {
+  applyQuoteValidation,
+  duplicateTripleRate,
+  summarizeQuoteLengths,
+  validateQuote,
+} from "../pipeline/extractor";
 import {
   ExtractionFailedError,
   embedSingle,
@@ -84,8 +89,13 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
     const chunkText =
       "In fiscal year 2023, Acme Corporation reported total revenue of $4.2 billion, representing a 12% increase year-over-year. Operating margin expanded to 28.5%.";
 
+    const usage: { inputTokens: number; outputTokens: number }[] = [];
     const t0 = Date.now();
-    const extracted = await extractTextChunk(chunkText);
+    const extracted = await extractTextChunk(chunkText, {
+      onUsage: (u) => {
+        usage.push(u);
+      },
+    });
     const wallClockMs = Date.now() - t0;
 
     expect(extracted.length).toBeGreaterThanOrEqual(1);
@@ -99,10 +109,16 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
       expect(fact.confidence).toBeGreaterThan(0);
     }
 
+    const dupScore = duplicateTripleRate(extracted);
+    console.log(
+      `[Selectivity] Test 1: ${extracted.length} facts, real usage in=${usage[0]?.inputTokens ?? "?"} out=${usage[0]?.outputTokens ?? "?"}, dup-triple rate=${(dupScore.rate * 100).toFixed(1)}%, quote lengths=${JSON.stringify(summarizeQuoteLengths(extracted.map((f) => f.sourceQuote)))}`
+    );
+
     benchmarkMetrics.push({
       action: "Test 1: Gemini text extraction",
       itemsExtracted: extracted.length,
-      tokensEstimated: Math.ceil(chunkText.length / 4),
+      tokensEstimated:
+        usage[0]?.outputTokens ?? Math.ceil(chunkText.length / 4),
       wallClockMs,
     });
   }, 90_000);
@@ -380,6 +396,12 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
         .from(facts)
         .where(eq(facts.documentId, doc.id));
       expect(factsRun1.length).toBe(extractRes.factsExtracted);
+
+      // Selectivity scoreboard on the full fixture document
+      const dupScore = duplicateTripleRate(factsRun1);
+      console.log(
+        `[Selectivity] Test 5: ${factsRun1.length} facts persisted, dup-triple rate=${(dupScore.rate * 100).toFixed(1)}%, quote lengths=${JSON.stringify(summarizeQuoteLengths(factsRun1.map((f) => f.sourceQuote)))}, wallClockMs=${wallClockMs}`
+      );
 
       // 3. Re-run processExtractJob (Idempotency test)
       const rerunRes = await processExtractJob({
