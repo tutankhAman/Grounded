@@ -1,6 +1,7 @@
 import {
   addReconcileJob,
   and,
+  type DocumentStatus,
   db,
   documents,
   entities,
@@ -50,7 +51,7 @@ const publishProgress = (
   documentId: string,
   current: number,
   total: number,
-  status: string
+  status: DocumentStatus
 ): void => {
   publishDocumentProgress(documentId, {
     progress: { current, total },

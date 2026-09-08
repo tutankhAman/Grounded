@@ -217,7 +217,9 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
 
       const res = ruleReconcile(factA, factB);
       expect(res.escalate).toBe(true);
-      expect(res.reason).toContain("requires LLM judge");
+      if (res.escalate) {
+        expect(res.reason).toContain("requires LLM judge");
+      }
     });
 
     it("escalates when timeScope is missing on either side", () => {
@@ -236,7 +238,9 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
 
       const res = ruleReconcile(factA, factB);
       expect(res.escalate).toBe(true);
-      expect(res.reason).toContain("Missing time scope");
+      if (res.escalate) {
+        expect(res.reason).toContain("Missing time scope");
+      }
     });
   });
 
@@ -300,7 +304,9 @@ describe("Phase-4 Matcher & Reconciler Pure Unit Tests", () => {
 
       const res = ruleReconcile(factA, factB);
       expect(res.escalate).toBe(true);
-      expect(res.reason).toContain("LLM judge");
+      if (res.escalate) {
+        expect(res.reason).toContain("LLM judge");
+      }
     });
   });
 

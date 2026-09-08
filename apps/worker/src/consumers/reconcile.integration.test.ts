@@ -19,9 +19,9 @@ const hasKey = Boolean(process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
 
 let judgeCallCount = 0;
 
-const makeUnitVector = (dim: number): number[] => {
-  const vec = new Array(1536).fill(0);
-  vec[dim % 1536] = 1;
+const makeUnitVector = (dim: number, slot = 0): number[] => {
+  const vec = new Array(dim).fill(0);
+  vec[slot % dim] = 1;
   return vec;
 };
 
@@ -33,6 +33,9 @@ const slotFor = (text: string): number => {
   }
   if (lower.includes("employee")) {
     return 30;
+  }
+  if (lower.includes("director")) {
+    return 50;
   }
   if (lower.includes("margin")) {
     return 50;

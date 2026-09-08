@@ -11,6 +11,7 @@ import {
   inArray,
   or,
   type ReconcileJob,
+  type ReconciliationResult,
   relationships,
   sql,
 } from "@grounded/db";
@@ -143,6 +144,7 @@ interface CandidateQueryRow {
   candidateFilename: string | null;
   currency: string | null;
   documentId: string;
+  entityId: string | null;
   factTypeId: string | null;
   id: string;
   predicate: string;
@@ -169,6 +171,7 @@ const findCandidateFacts = async (
       candidateFilename: documents.filename,
       currency: facts.currency,
       documentId: facts.documentId,
+      entityId: facts.entityId,
       factTypeId: facts.factTypeId,
       id: facts.id,
       predicate: facts.predicate,
@@ -201,6 +204,8 @@ const findCandidateFacts = async (
     currency: row.currency,
     distance: Number(row.vectorDistance ?? 2),
     documentId: row.documentId,
+    entityId: row.entityId,
+    entityName: null,
     factTypeId: row.factTypeId,
     id: row.id,
     predicate: row.predicate,

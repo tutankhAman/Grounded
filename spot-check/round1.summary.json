@@ -1,0 +1,19 @@
+{
+  "counts": {
+    "correct": 30,
+    "quoteWrong": 0,
+    "scopeWrong": 0,
+    "unverified": 0,
+    "valueWrong": 0
+  },
+  "precision": 1,
+  "sampleSize": 30,
+  "timestamp": "2026-09-08T15:41:18.000Z",
+  "verdictBreakdown": {
+    "correct": "100.0%",
+    "quoteWrong": "0.0%",
+    "scopeWrong": "0.0%",
+    "unverified": "0.0%",
+    "valueWrong": "0.0%"
+  }
+}

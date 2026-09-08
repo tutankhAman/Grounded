@@ -53,7 +53,7 @@ export interface ProcessExtractOptions {
   textExtractor?: (rawText: string) => Promise<Record<string, unknown>[]>;
   visionExtractor?: (
     images: string[] | string,
-    pageNumbersOrHint?: number[] | string,
+    pageNumbersOrHint?: number[] | number | string,
     hint?: string
   ) => Promise<Record<string, unknown>[]>;
 }
