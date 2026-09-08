@@ -205,4 +205,57 @@ describe.skipIf(!dbAvailable)("WS /documents/:id/status", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(getSubscriberCount(pendingDocId)).toBe(0);
   });
+
+  it("closes with 1000 after delivering a terminal event (no error, no leak)", async () => {
+    const ws = new WebSocket(
+      `ws://localhost:${port}/documents/${pendingDocId}/status`
+    );
+
+    const messages: DocumentProgressEvent[] = [];
+
+    // Snapshot first
+    await new Promise<void>((resolve) => {
+      ws.onmessage = (event) => {
+        messages.push(JSON.parse(String(event.data)));
+        resolve();
+      };
+    });
+    expect(messages[0].status).toBe("pending");
+
+    // Terminal event must be delivered AND followed by a clean close —
+    // the client must never show a reconnect error for a finished pipeline.
+    const terminalEvent: DocumentProgressEvent = {
+      progress: { current: 3, total: 3 },
+      stage: "extract",
+      status: "done",
+    };
+
+    const terminalMessagePromise = new Promise<void>((resolve) => {
+      ws.onmessage = (event) => {
+        const payload = JSON.parse(String(event.data));
+        // Snapshot assertion errors carry { error }; terminal events don't.
+        if (!("error" in payload)) {
+          messages.push(payload);
+          resolve();
+        }
+      };
+    });
+    const closePromise = new Promise<number>((resolve) => {
+      ws.onclose = (event) => {
+        resolve(event.code);
+      };
+    });
+
+    await testRedisPublisher.publish(
+      `doc:${pendingDocId}:status`,
+      JSON.stringify(terminalEvent)
+    );
+
+    await terminalMessagePromise;
+    const code = await closePromise;
+
+    expect(messages.at(-1)?.status).toBe("done");
+    expect(code).toBe(1000);
+    expect(getSubscriberCount(pendingDocId)).toBe(0);
+  });
 });
