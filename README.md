@@ -50,3 +50,11 @@ grounded/
 ├── .env.example
 └── package.json
 ```
+
+---
+
+## Limitations
+
+- **Models**: Extraction uses `gemini-3.5-flash-lite` via OpenAI-compatible gateway (fallback `gemini-3.1-flash-lite`); embeddings via `gemini-embedding-001` (1536 dims with L2 normalization).
+- **Free-Tier Data Usage**: Free-tier Google AI Studio API keys may use prompt data for model improvement. For confidential/production documents, use paid tier or Vertex AI endpoint.
+
