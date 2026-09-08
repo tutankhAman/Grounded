@@ -4,7 +4,6 @@ import {
   type BatchExtractedFact,
   db,
   documents,
-  type ExtractedFact,
   type ExtractJob,
   eq,
   facts,
@@ -48,14 +47,42 @@ export interface ExtractResult {
 
 export interface ProcessExtractOptions {
   batchExtractor?: (pages: PageBatchItem[]) => Promise<BatchExtractedFact[]>;
-  textExtractor?: (
-    rawText: string
-  ) => Promise<Array<BatchExtractedFact | ExtractedFact>>;
+  textExtractor?: (rawText: string) => Promise<Record<string, unknown>[]>;
   visionExtractor?: (
     images: string[] | string,
     pageNumbersOrHint?: number[] | string,
     hint?: string
-  ) => Promise<Array<BatchExtractedFact | ExtractedFact>>;
+  ) => Promise<Record<string, unknown>[]>;
+}
+
+function normalizeExtractedFact(
+  raw: Record<string, unknown>,
+  defaultPageNumber: number
+): BatchExtractedFact {
+  return {
+    confidence: typeof raw.confidence === "number" ? raw.confidence : 1,
+    currency: typeof raw.currency === "string" ? raw.currency : undefined,
+    entity: (raw.entity as
+      | { context: string; name: string; type: string }
+      | undefined) ?? {
+      context: "",
+      name: "Unknown",
+      type: "Unknown",
+    },
+    factTypeDescription: String(raw.factTypeDescription ?? ""),
+    pageNumber:
+      typeof raw.pageNumber === "number" ? raw.pageNumber : defaultPageNumber,
+    predicate: String(raw.predicate ?? ""),
+    qualifiers:
+      raw.qualifiers && typeof raw.qualifiers === "object"
+        ? (raw.qualifiers as Record<string, unknown>)
+        : {},
+    rawValue: String(raw.rawValue ?? ""),
+    sourceQuote: String(raw.sourceQuote ?? ""),
+    timeScope: typeof raw.timeScope === "string" ? raw.timeScope : undefined,
+    unit: typeof raw.unit === "string" ? raw.unit : undefined,
+    value: String(raw.value ?? ""),
+  };
 }
 
 export const canonicalizeFactType = async (
@@ -264,7 +291,7 @@ async function runBatchWithSplitRetry(
       for (const item of batch) {
         const itemFacts = await options.textExtractor(item.text);
         for (const f of itemFacts) {
-          results.push({ ...f, pageNumber: item.pageNumber });
+          results.push(normalizeExtractedFact(f, item.pageNumber));
         }
       }
       return results;
@@ -337,10 +364,7 @@ async function escalateTablePageIfNeeded(
       (f) => f.pageNumber !== batchItem.pageNumber
     );
     for (const vf of visionFacts) {
-      otherFacts.push({
-        ...vf,
-        pageNumber: batchItem.pageNumber,
-      });
+      otherFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber));
     }
     return { facts: otherFacts, visionEscalated: true };
   } catch (escErr) {
@@ -388,13 +412,8 @@ async function processVisionGroup(
     : await extractVisionPage(dataUrls, validPageNums, combinedHint);
 
   const normalizedVisionFacts: BatchExtractedFact[] = rawVisionResult.map(
-    (f, idx) => ({
-      ...f,
-      pageNumber:
-        "pageNumber" in f && typeof f.pageNumber === "number"
-          ? f.pageNumber
-          : (validPageNums[idx % validPageNums.length] ?? 1),
-    })
+    (f, idx) =>
+      normalizeExtractedFact(f, validPageNums[idx % validPageNums.length] ?? 1)
   );
 
   const { validFacts } = validateBatchResult(

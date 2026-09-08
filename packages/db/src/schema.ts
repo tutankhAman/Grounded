@@ -13,7 +13,7 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 
-// Standardized embedding dimension matching EMBEDDING_DIM env var (gemini-embedding-2 MRL 1536)
+// Standardized embedding dimension matching EMBEDDING_DIM env var (gemini-embedding-001 MRL 1536)
 export const EMBEDDING_DIM = 1536;
 
 export const documents = pgTable("documents", {

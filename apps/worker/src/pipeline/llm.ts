@@ -201,11 +201,13 @@ function normalizeVisionArgs(
   };
 }
 
+type VisionContentPart =
+  | { data: string; mediaType: string; type: "file" }
+  | { text: string; type: "text" };
+
 async function handleVisionFallback(
   model: Parameters<typeof generateText>[0]["model"],
-  contentParts: Parameters<
-    typeof generateText
-  >[0]["messages"][number]["content"],
+  contentParts: VisionContentPart[],
   schemaErr: unknown
 ): Promise<BatchExtractedFact[]> {
   try {
