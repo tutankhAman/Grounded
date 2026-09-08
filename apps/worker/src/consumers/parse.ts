@@ -41,6 +41,8 @@ export const processParseJob = async (
 
   let finalTotalPages = 0;
   let totalChunks = 0;
+  let persistedPages = 0;
+  const failedPages: number[] = [];
 
   try {
     // 2. Stream pages lazily with O(1-page) memory
@@ -86,6 +88,7 @@ export const processParseJob = async (
         );
 
         totalChunks += chunks.length;
+        persistedPages++;
 
         // 4. Fire-and-forget progress message (never await delivery)
         pubRedis
@@ -103,6 +106,7 @@ export const processParseJob = async (
             // Ignored: fire-and-forget
           });
       } catch (pageErr: unknown) {
+        failedPages.push(pageNumber);
         const message =
           pageErr instanceof Error ? pageErr.message : String(pageErr);
         // Log warning and continue processing remaining pages
@@ -112,26 +116,34 @@ export const processParseJob = async (
       }
     }
 
-    // 5. Update document to 'parsed' with verified pageCount
+    const hasFailures = failedPages.length > 0;
+    const terminalStatus: "parsed" | "failed" =
+      persistedPages === 0 ? "failed" : "parsed";
+    const terminalError: string | null = hasFailures
+      ? `Failed to persist ${failedPages.length} page(s): ${failedPages.join(", ")}`
+      : null;
+
+    // 5. Update document status with verified persisted page count
     await db
       .update(documents)
       .set({
-        errorMessage: null,
-        pageCount: finalTotalPages,
-        status: "parsed",
+        errorMessage: terminalError,
+        pageCount: persistedPages,
+        status: terminalStatus,
       })
       .where(eq(documents.id, documentId));
 
-    // Notify completion
+    // Notify completion with actual terminal status
     pubRedis
       .publish(
         `doc:${documentId}:status`,
         JSON.stringify({
+          errorMessage: terminalError,
           progress: {
-            current: finalTotalPages,
+            current: persistedPages,
             total: finalTotalPages,
           },
-          status: "parsed",
+          status: terminalStatus,
         })
       )
       .catch((_err) => {
