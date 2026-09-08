@@ -92,7 +92,8 @@ flowchart TB
 | Live WS progress with ETA, verified subscriptions | Worker publishes per-stage progress; a failed subscribe surfaces an error instead of silently stalling                                |
 
 
-*AI tools used: built with an AI coding agent (Muse Spark via OpenCode), with measured numbers replacing estimates throughout.*
+*AI tools used: built with multi coding agent lineup (Muse Spark via OpenCode, Gemini flash 3.8 via antigravity), with measured numbers replacing estimates throughout.*
+*also required 4 cups of coffee to go through the night (its 4:00 am when I am writing this :'))*
 
 ## Setup and Run
 
