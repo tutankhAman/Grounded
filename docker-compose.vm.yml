@@ -1,0 +1,135 @@
+# Grounded — manual VM deploy (no Dokploy API needed).
+#
+# Usage (from repo root, with gcloud SSH access to larity-prod):
+#   1. Ship code: tar czf - --exclude=node_modules --exclude=.git \
+#        --exclude=uploads --exclude='apps/web/dist' . \
+#        | gcloud compute ssh larity-prod --zone=asia-south1-a \
+#        --command="mkdir -p /opt/grounded/src && tar xzf - -C /opt/grounded/src"
+#   2. Write /opt/grounded/.env.prod on the VM (POSTGRES_PASSWORD generated,
+#      LLM keys copied from local .env — never committed).
+#   3. On the VM in /opt/grounded/src:
+#      docker compose -f docker-compose.vm.yml --env-file /opt/grounded/.env.prod \
+#        -p grounded up -d --build
+#   4. Migrate once:
+#      docker exec grounded-api-1 bun packages/db/src/migrate.ts
+#
+# Routing reuses Dokploy's Traefik (same label pattern as luma-web-1):
+# grounded-api.aamn.dev -> api:3000 with automatic Let's Encrypt TLS.
+# Requires DNS: A grounded-api.aamn.dev -> 8.231.114.184
+
+name: grounded
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-grounded}
+      POSTGRES_USER: ${POSTGRES_USER:-grounded}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-grounded} -d $${POSTGRES_DB:-grounded}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+      - dokploy-network
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.grounded-api.entrypoints=web,websecure
+      - traefik.http.routers.grounded-api.rule=Host(`grounded-api.aamn.dev`)
+      - traefik.http.routers.grounded-api.tls=true
+      - traefik.http.routers.grounded-api.tls.certresolver=letsencrypt
+      - traefik.http.services.grounded-api.loadbalancer.server.port=3000
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-grounded}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-grounded}
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+    volumes:
+      - uploads:/app/uploads
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-grounded}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-grounded}
+      REDIS_URL: redis://redis:6379
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api-gateway.merge.dev/v1/ai-sdk}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TEXT_MODEL: ${TEXT_MODEL:-gemini-3.5-flash-lite}
+      TEXT_MODEL_FALLBACK: ${TEXT_MODEL_FALLBACK:-gemini-3.1-flash-lite}
+      VISION_MODEL: ${VISION_MODEL:-gemini-3.5-flash-lite}
+      THINKING_BUDGET: ${THINKING_BUDGET:-0}
+      VISION_ENABLED: ${VISION_ENABLED:-1}
+      SKIP_BOILERPLATE: ${SKIP_BOILERPLATE:-1}
+      EXTRACT_CONCURRENCY: ${EXTRACT_CONCURRENCY:-6}
+      EXTRACT_TARGET_OUTPUT_TOKENS: ${EXTRACT_TARGET_OUTPUT_TOKENS:-14000}
+      EXTRACT_MAX_PAGES_PER_BATCH: ${EXTRACT_MAX_PAGES_PER_BATCH:-15}
+      RESOLVE_CONCURRENCY: ${RESOLVE_CONCURRENCY:-3}
+      RENDER_SCALE: ${RENDER_SCALE:-1.5}
+      LLM_RPM_BUDGET: ${LLM_RPM_BUDGET:-60}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-gemini-embedding-001}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      EMBEDDING_TASK_DOC: ${EMBEDDING_TASK_DOC:-RETRIEVAL_DOCUMENT}
+      EMBED_DIRECT: ${EMBED_DIRECT:-0}
+      FACT_TYPE_SIMILARITY_THRESHOLD: ${FACT_TYPE_SIMILARITY_THRESHOLD:-0.85}
+      ENTITY_MATCH_THRESHOLD: ${ENTITY_MATCH_THRESHOLD:-0.80}
+      MATCH_DISTANCE: ${MATCH_DISTANCE:-0.35}
+      MATCH_CANDIDATES: ${MATCH_CANDIDATES:-10}
+      RECONCILE_CONCURRENCY: ${RECONCILE_CONCURRENCY:-4}
+      JUDGE_MODEL: ${JUDGE_MODEL:-}
+      JUDGE_THINKING_BUDGET: ${JUDGE_THINKING_BUDGET:-0}
+    volumes:
+      - uploads:/app/uploads
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

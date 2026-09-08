@@ -1,0 +1,145 @@
+# Grounded — production stack for Dokploy (Compose app, repo-root context).
+#
+# Dokploy wiring (dashboard or API):
+#   1. New Compose app from tutankhAman/Grounded, compose path:
+#      docker-compose.prod.yml
+#   2. Add domain grounded-api.aamn.dev on the `api` service, port 3000
+#      (Traefik + Let's Encrypt are automatic).
+#   3. Fill Environment below in the Dokploy env editor. Secrets (marked
+#      REQUIRED) have no defaults on purpose. Use an alphanumeric
+#      POSTGRES_PASSWORD (it is interpolated into DATABASE_URL).
+#   4. Deploy, then run migrations once (see README deploy section).
+#
+# Env reference — copy into Dokploy Environment:
+#   POSTGRES_DB=grounded
+#   POSTGRES_USER=grounded
+#   POSTGRES_PASSWORD=<REQUIRED, alphanumeric>
+#   LLM_BASE_URL=https://api-gateway.merge.dev/v1/ai-sdk
+#   LLM_API_KEY=<REQUIRED>
+#   GEMINI_API_KEY=<REQUIRED if embeddings/judge fall back to direct Google>
+#   TEXT_MODEL=gemini-3.5-flash-lite
+#   TEXT_MODEL_FALLBACK=gemini-3.1-flash-lite
+#   VISION_MODEL=gemini-3.5-flash-lite
+#   THINKING_BUDGET=0
+#   VISION_ENABLED=1
+#   SKIP_BOILERPLATE=1
+#   EXTRACT_CONCURRENCY=6
+#   EXTRACT_TARGET_OUTPUT_TOKENS=14000
+#   EXTRACT_MAX_PAGES_PER_BATCH=15
+#   RESOLVE_CONCURRENCY=3
+#   RENDER_SCALE=1.5
+#   LLM_RPM_BUDGET=60
+#   EMBEDDING_MODEL=gemini-embedding-001
+#   EMBEDDING_DIM=1536
+#   EMBEDDING_TASK_DOC=RETRIEVAL_DOCUMENT
+#   EMBED_DIRECT=0
+#   FACT_TYPE_SIMILARITY_THRESHOLD=0.85
+#   ENTITY_MATCH_THRESHOLD=0.80
+#   MATCH_DISTANCE=0.35
+#   MATCH_CANDIDATES=10
+#   RECONCILE_CONCURRENCY=4
+#   JUDGE_MODEL=
+#   JUDGE_THINKING_BUDGET=0
+#   MAX_UPLOAD_MB=100
+
+name: grounded
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-grounded}
+      POSTGRES_USER: ${POSTGRES_USER:-grounded}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-grounded} -d $${POSTGRES_DB:-grounded}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-grounded}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-grounded}
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+    volumes:
+      - uploads:/app/uploads
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-grounded}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-grounded}
+      REDIS_URL: redis://redis:6379
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api-gateway.merge.dev/v1/ai-sdk}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TEXT_MODEL: ${TEXT_MODEL:-gemini-3.5-flash-lite}
+      TEXT_MODEL_FALLBACK: ${TEXT_MODEL_FALLBACK:-gemini-3.1-flash-lite}
+      VISION_MODEL: ${VISION_MODEL:-gemini-3.5-flash-lite}
+      THINKING_BUDGET: ${THINKING_BUDGET:-0}
+      VISION_ENABLED: ${VISION_ENABLED:-1}
+      SKIP_BOILERPLATE: ${SKIP_BOILERPLATE:-1}
+      EXTRACT_CONCURRENCY: ${EXTRACT_CONCURRENCY:-6}
+      EXTRACT_TARGET_OUTPUT_TOKENS: ${EXTRACT_TARGET_OUTPUT_TOKENS:-14000}
+      EXTRACT_MAX_PAGES_PER_BATCH: ${EXTRACT_MAX_PAGES_PER_BATCH:-15}
+      RESOLVE_CONCURRENCY: ${RESOLVE_CONCURRENCY:-3}
+      RENDER_SCALE: ${RENDER_SCALE:-1.5}
+      LLM_RPM_BUDGET: ${LLM_RPM_BUDGET:-60}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-gemini-embedding-001}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      EMBEDDING_TASK_DOC: ${EMBEDDING_TASK_DOC:-RETRIEVAL_DOCUMENT}
+      EMBED_DIRECT: ${EMBED_DIRECT:-0}
+      FACT_TYPE_SIMILARITY_THRESHOLD: ${FACT_TYPE_SIMILARITY_THRESHOLD:-0.85}
+      ENTITY_MATCH_THRESHOLD: ${ENTITY_MATCH_THRESHOLD:-0.80}
+      MATCH_DISTANCE: ${MATCH_DISTANCE:-0.35}
+      MATCH_CANDIDATES: ${MATCH_CANDIDATES:-10}
+      RECONCILE_CONCURRENCY: ${RECONCILE_CONCURRENCY:-4}
+      JUDGE_MODEL: ${JUDGE_MODEL:-}
+      JUDGE_THINKING_BUDGET: ${JUDGE_THINKING_BUDGET:-0}
+    volumes:
+      - uploads:/app/uploads
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+uploads/
+.env
+.env.*.local
+.git/
+spot-check/
+starter-datasets/
+*.log
+.DS_Store
