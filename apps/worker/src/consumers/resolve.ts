@@ -1,4 +1,5 @@
 import {
+  addReconcileJob,
   and,
   db,
   documents,
@@ -392,6 +393,12 @@ export const processResolveJob = async (
       .where(eq(documents.id, documentId));
 
     publishProgress(documentId, clusters.length, clusters.length, "resolved");
+
+    try {
+      await addReconcileJob({ documentId });
+    } catch {
+      // Ignored: best-effort queueing
+    }
 
     return {
       documentId,
