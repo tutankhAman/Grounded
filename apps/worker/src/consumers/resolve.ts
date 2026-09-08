@@ -125,20 +125,20 @@ const findMatchingEntity = async (
     return null;
   }
 
-  const confirmations = await Promise.all(
-    eligible.map(async (cand) => {
-      const confirm = await confirmFn({
-        contextA: cluster.contextSample,
-        contextB: cand.contextSample,
-        nameA: cluster.canonicalName,
-        nameB: cand.canonicalName,
-      });
-      return { id: cand.id, same: confirm.same };
-    })
-  );
+  for (const cand of eligible) {
+    // biome-ignore lint/performance/noAwaitInLoops: sequential short-circuit avoids unnecessary LLM confirmation calls
+    const confirm = await confirmFn({
+      contextA: cluster.contextSample,
+      contextB: cand.contextSample,
+      nameA: cluster.canonicalName,
+      nameB: cand.canonicalName,
+    });
+    if (confirm.same) {
+      return cand.id;
+    }
+  }
 
-  const matched = confirmations.find((c) => c.same);
-  return matched ? matched.id : null;
+  return null;
 };
 
 const persistCluster = async (
@@ -150,6 +150,9 @@ const persistCluster = async (
   let resolvedEntityId = targetEntityId;
 
   if (!resolvedEntityId) {
+    // Note on entities.embedding persistence:
+    // Storing cluster embedding in entities.embedding enables downstream cross-document matching
+    // via vector cosine distance (ORDER BY embedding <=> $1 LIMIT 5).
     const [inserted] = await db
       .insert(entities)
       .values({
@@ -158,12 +161,28 @@ const persistCluster = async (
         embedding,
         entityType: cluster.entityType,
       })
+      .onConflictDoNothing()
       .returning({ id: entities.id });
 
-    if (!inserted) {
-      throw new Error(`Failed to insert entity for ${cluster.canonicalName}`);
+    if (inserted) {
+      resolvedEntityId = inserted.id;
+    } else {
+      // Conflict on unique lower(canonical_name) index: find existing entity
+      const [existing] = await db
+        .select({ id: entities.id })
+        .from(entities)
+        .where(
+          sql`lower(${entities.canonicalName}) = lower(${cluster.canonicalName})`
+        )
+        .limit(1);
+
+      if (!existing) {
+        throw new Error(
+          `Failed to insert or find entity for ${cluster.canonicalName}`
+        );
+      }
+      resolvedEntityId = existing.id;
     }
-    resolvedEntityId = inserted.id;
   }
 
   // Insert entity aliases
@@ -193,6 +212,70 @@ const persistCluster = async (
   await Promise.all(chunkPromises);
 
   return resolvedEntityId;
+};
+
+const getOrCreateFallbackEntity = async (): Promise<string> => {
+  const [existingFallback] = await db
+    .select({ id: entities.id })
+    .from(entities)
+    .where(sql`lower(${entities.canonicalName}) = 'unresolved entity'`)
+    .limit(1);
+
+  if (existingFallback) {
+    return existingFallback.id;
+  }
+
+  const [minted] = await db
+    .insert(entities)
+    .values({
+      canonicalName: "Unresolved Entity",
+      contextSample: "Fallback entity for unlinked facts",
+      entityType: "unknown",
+    })
+    .onConflictDoNothing()
+    .returning({ id: entities.id });
+
+  if (minted) {
+    return minted.id;
+  }
+
+  const [found] = await db
+    .select({ id: entities.id })
+    .from(entities)
+    .where(sql`lower(${entities.canonicalName}) = 'unresolved entity'`)
+    .limit(1);
+
+  if (!found) {
+    throw new Error("Failed to create or retrieve fallback entity");
+  }
+  return found.id;
+};
+
+const linkUnresolvedFacts = async (documentId: string): Promise<number> => {
+  const unlinked = await db
+    .select({ id: facts.id })
+    .from(facts)
+    .where(and(eq(facts.documentId, documentId), isNull(facts.entityId)));
+
+  if (unlinked.length === 0) {
+    return 0;
+  }
+
+  const fallbackEntityId = await getOrCreateFallbackEntity();
+  const unlinkedIds = unlinked.map((u) => u.id);
+  const unlinkedPromises: Promise<unknown>[] = [];
+
+  for (let j = 0; j < unlinkedIds.length; j += BACKFILL_CHUNK_SIZE) {
+    const chunk = unlinkedIds.slice(j, j + BACKFILL_CHUNK_SIZE);
+    unlinkedPromises.push(
+      db
+        .update(facts)
+        .set({ entityId: fallbackEntityId })
+        .where(inArray(facts.id, chunk))
+    );
+  }
+  await Promise.all(unlinkedPromises);
+  return unlinked.length;
 };
 
 export const processResolveJob = async (
@@ -296,41 +379,12 @@ export const processResolveJob = async (
 
         publishProgress(documentId, i + 1, clusters.length, "resolving");
       },
-      { concurrency: 2 }
+      { concurrency: 1 }
     );
 
     // Fallback check: guarantee every fact has non-null entityId
-    const unlinked = await db
-      .select({ id: facts.id })
-      .from(facts)
-      .where(and(eq(facts.documentId, documentId), isNull(facts.entityId)));
-
-    if (unlinked.length > 0) {
-      const [fallbackEntity] = await db
-        .insert(entities)
-        .values({
-          canonicalName: "Unresolved Entity",
-          contextSample: "Fallback entity for unlinked facts",
-          entityType: "unknown",
-        })
-        .returning({ id: entities.id });
-
-      if (fallbackEntity) {
-        const unlinkedIds = unlinked.map((u) => u.id);
-        const unlinkedPromises: Promise<unknown>[] = [];
-        for (let j = 0; j < unlinkedIds.length; j += BACKFILL_CHUNK_SIZE) {
-          const chunk = unlinkedIds.slice(j, j + BACKFILL_CHUNK_SIZE);
-          unlinkedPromises.push(
-            db
-              .update(facts)
-              .set({ entityId: fallbackEntity.id })
-              .where(inArray(facts.id, chunk))
-          );
-        }
-        await Promise.all(unlinkedPromises);
-        factsLinkedCount += unlinked.length;
-      }
-    }
+    const unlinkedCount = await linkUnresolvedFacts(documentId);
+    factsLinkedCount += unlinkedCount;
 
     await db
       .update(documents)

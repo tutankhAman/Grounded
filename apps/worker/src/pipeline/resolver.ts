@@ -48,6 +48,7 @@ const WHITESPACE_REGEX = /\s+/g;
 const OUTER_QUOTES_START_REGEX = /^["'‘“]+/;
 const OUTER_QUOTES_END_REGEX = /["'’”]+$/;
 const JSON_BLOCK_REGEX = /\{[\s\S]*\}/;
+const FIRST_YES_NO_REGEX = /\b(YES|NO)\b/i;
 
 /**
  * Normalizes an entity name for display: trims whitespace and outer punctuation.
@@ -401,6 +402,10 @@ const groupIndicesByCluster = (
 
 /**
  * Clusters entity mentions within a single document.
+ *
+ * Scale ceiling: Performs pairwise comparison across unique surface forms (O(U^2) where U is
+ * the count of distinct names in a document, typically U <= 100). For documents with thousands
+ * of distinct surface forms, prefix indexing or blocking would be required.
  */
 export const clusterSurfaceForms = (
   mentions: RawEntityMention[],
@@ -513,18 +518,9 @@ export const parseConfirmResponse = (text: string): EntityConfirm => {
     // Continue to text parsing
   }
 
-  const upper = trimmed.toUpperCase();
-  const yesIndex = upper.indexOf("YES");
-  const noIndex = upper.indexOf("NO");
-
-  let same = false;
-  if (yesIndex !== -1 && noIndex === -1) {
-    same = true;
-  } else if (noIndex !== -1 && yesIndex === -1) {
-    same = false;
-  } else if (yesIndex !== -1 && noIndex !== -1) {
-    same = yesIndex < noIndex;
-  }
+  const match = trimmed.match(FIRST_YES_NO_REGEX);
+  const firstToken = match?.[1]?.toUpperCase();
+  const same = firstToken === "YES";
 
   return {
     reasoning: trimmed,

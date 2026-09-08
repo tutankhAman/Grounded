@@ -205,6 +205,28 @@ describe("resolver pure functions", () => {
       expect(parsed.same).toBe(false);
       expect(parsed.reasoning).toContain("Apple Inc.");
     });
+
+    it("correctly identifies YES when words containing 'no' like 'known' precede it", () => {
+      const parsed = parseConfirmResponse(
+        "These are well-known subsidiaries of the parent company. YES."
+      );
+      expect(parsed.same).toBe(true);
+      expect(parsed.reasoning).toContain("well-known");
+    });
+
+    it("correctly identifies YES with prefix Answer:", () => {
+      const parsed = parseConfirmResponse(
+        "Answer: YES. Both refer to the same corporate entity."
+      );
+      expect(parsed.same).toBe(true);
+    });
+
+    it("correctly identifies NO with prefix Answer:", () => {
+      const parsed = parseConfirmResponse(
+        "Answer: NO. They are completely separate corporations."
+      );
+      expect(parsed.same).toBe(false);
+    });
   });
 
   describe("buildEntityConfirmPrompt", () => {
