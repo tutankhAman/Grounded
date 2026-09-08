@@ -2,14 +2,15 @@
   "name": "@grounded/db",
   "version": "0.1.0",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema.ts",
     "./client": "./src/client.ts",
-    "./extractionSchema": "./src/extractionSchema.ts"
+    "./extractionSchema": "./src/extraction-schema.ts",
+    "./extraction-schema": "./src/extraction-schema.ts"
   },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "scripts": {
     "generate": "drizzle-kit generate",
     "migrate": "bun run ./src/migrate.ts",

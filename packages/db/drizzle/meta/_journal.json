@@ -8,6 +8,13 @@
       "when": 1788843910395,
       "tag": "0000_brave_boomerang",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788845980575,
+      "tag": "0001_fluffy_otto_octavius",
+      "breakpoints": true
     }
   ]
 }

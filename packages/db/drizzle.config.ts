@@ -1,16 +1,18 @@
-import { defineConfig } from 'drizzle-kit';
-import * as dotenv from 'dotenv';
-import { resolve } from 'path';
+import { resolve } from "node:path";
+import dotenv from "dotenv";
+import { defineConfig } from "drizzle-kit";
 
-dotenv.config({ path: resolve(__dirname, '../../.env') });
+dotenv.config({ path: resolve(import.meta.dirname, "../../.env") });
 
 export default defineConfig({
-  schema: './src/schema.ts',
-  out: './drizzle',
-  dialect: 'postgresql',
   dbCredentials: {
-    url: process.env.DATABASE_URL || 'postgresql://grounded:grounded@localhost:5432/grounded',
+    url:
+      process.env.DATABASE_URL ||
+      "postgresql://grounded:grounded@localhost:5432/grounded",
   },
-  verbose: true,
+  dialect: "postgresql",
+  out: "./drizzle",
+  schema: "./src/schema.ts",
   strict: true,
+  verbose: true,
 });

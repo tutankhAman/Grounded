@@ -5,5 +5,35 @@
     "ultracite/biome/react",
     "ultracite/biome/tanstack",
     "ultracite/biome/vitest"
-  ]
+  ],
+  "files": {
+    "includes": [
+      "apps/**",
+      "packages/**",
+      "!**/drizzle",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/scripts"
+    ]
+  },
+  "javascript": {
+    "globals": ["Bun"]
+  },
+  "linter": {
+    "rules": {
+      "performance": {
+        "noBarrelFile": "off",
+        "noNamespaceImport": "off",
+        "noAwaitInLoops": "off"
+      },
+      "style": {
+        "noIncrementDecrement": "off",
+        "noNestedTernary": "off",
+        "useFilenamingConvention": "off"
+      },
+      "suspicious": {
+        "noConsole": "off"
+      }
+    }
+  }
 }

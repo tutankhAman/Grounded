@@ -1,4 +1,24 @@
 {
+  "name": "grounded",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun --filter '*' build",
+    "check": "ultracite check",
+    "db:generate": "bun run --cwd packages/db generate",
+    "db:migrate": "bun run --cwd packages/db migrate",
+    "db:push": "bun run --cwd packages/db push",
+    "db:studio": "bun run --cwd packages/db studio",
+    "dev": "concurrently -n api,worker,web -c blue,magenta,green \"bun run --cwd apps/api dev\" \"bun run --cwd apps/worker dev\" \"bun run --cwd apps/web dev\"",
+    "fix": "ultracite fix",
+    "lint": "bun --filter '*' lint",
+    "prepare": "lefthook install"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@types/bun": "^1.4.2",
@@ -6,25 +26,5 @@
     "lefthook": "^2.1.12",
     "typescript": "^5.8.2",
     "ultracite": "7.11.0"
-  },
-  "name": "grounded",
-  "scripts": {
-    "dev": "concurrently -n api,worker,web -c blue,magenta,green \"bun run --cwd apps/api dev\" \"bun run --cwd apps/worker dev\" \"bun run --cwd apps/web dev\"",
-    "build": "bun --filter '*' build",
-    "db:generate": "bun run --cwd packages/db generate",
-    "db:migrate": "bun run --cwd packages/db migrate",
-    "db:push": "bun run --cwd packages/db push",
-    "db:studio": "bun run --cwd packages/db studio",
-    "lint": "bun --filter '*' lint",
-    "check": "ultracite check",
-    "fix": "ultracite fix",
-    "prepare": "lefthook install"
-  },
-  "type": "module",
-  "version": "0.1.0",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
-  "private": true
+  }
 }
