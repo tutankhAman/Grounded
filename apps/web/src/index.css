@@ -1,38 +1,39 @@
 :root {
-  --bg-color: #0d0e11;
-  --sidebar-bg: #121418;
-  --card-bg: #16181d;
-  --card-bg-hover: #1e2229;
-  --border-color: #242831;
-  --border-subtle: #1a1d24;
-  --text-main: #f0f2f5;
-  --text-muted: #8c93a0;
-  --text-dim: #5c6370;
+  --bg-color: #f4f5f1;
+  --sidebar-bg: #ffffff;
+  --card-bg: #ffffff;
+  --card-bg-hover: #eef0e9;
+  --border-color: #e2e5dc;
+  --border-subtle: #edefe8;
+  --text-main: #1a1d21;
+  --text-muted: #5f6570;
+  --text-dim: #9aa0ab;
 
-  --accent-olive: #9fa855;
-  --accent-olive-light: #c0cb6d;
-  --accent-olive-bg: rgba(159, 168, 85, 0.12);
+  --accent-olive: #6d7d24;
+  --accent-olive-light: #55611c;
+  --accent-olive-bg: rgba(109, 125, 36, 0.1);
 
-  --accent-red: #e06c75;
-  --accent-red-bg: rgba(224, 108, 117, 0.12);
+  --accent-red: #c93a44;
+  --accent-red-bg: rgba(201, 58, 68, 0.08);
 
-  --accent-green: #98c379;
-  --accent-green-bg: rgba(152, 195, 121, 0.12);
+  --accent-green: #2f7d3b;
+  --accent-green-bg: rgba(47, 125, 59, 0.08);
 
-  --accent-blue: #61afef;
-  --accent-blue-bg: rgba(97, 175, 239, 0.12);
+  --accent-blue: #1d6fd1;
+  --accent-blue-bg: rgba(29, 111, 209, 0.08);
 
-  --accent-yellow: #e5c07b;
-  --accent-yellow-bg: rgba(229, 192, 123, 0.12);
+  --accent-yellow: #b45309;
+  --accent-yellow-bg: rgba(180, 83, 9, 0.1);
 
-  --accent-purple: #c678dd;
-  --accent-purple-bg: rgba(198, 120, 221, 0.12);
+  --accent-purple: #8b3fc0;
+  --accent-purple-bg: rgba(139, 63, 192, 0.08);
 
   --font-mono:
     "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --font-sans:
     "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
+  color-scheme: light;
 }
 
 * {
@@ -111,7 +112,7 @@ pre,
 .badge-corroborated {
   color: var(--accent-green);
   background: var(--accent-green-bg);
-  border: 1px solid rgba(152, 195, 121, 0.25);
+  border: 1px solid rgba(47, 125, 59, 0.3);
 }
 .badge-done .badge-dot,
 .badge-processed .badge-dot,
@@ -125,7 +126,7 @@ pre,
 .badge-failed {
   color: var(--accent-red);
   background: var(--accent-red-bg);
-  border: 1px solid rgba(224, 108, 117, 0.25);
+  border: 1px solid rgba(201, 58, 68, 0.3);
 }
 .badge-contradicts .badge-dot,
 .badge-contradicted .badge-dot,
@@ -136,7 +137,7 @@ pre,
 .badge-reconciled {
   color: var(--accent-blue);
   background: var(--accent-blue-bg);
-  border: 1px solid rgba(97, 175, 239, 0.25);
+  border: 1px solid rgba(29, 111, 209, 0.3);
 }
 .badge-reconciled .badge-dot {
   background: var(--accent-blue);
@@ -145,7 +146,7 @@ pre,
 .badge-uncertain {
   color: var(--accent-yellow);
   background: var(--accent-yellow-bg);
-  border: 1px solid rgba(229, 192, 123, 0.25);
+  border: 1px solid rgba(180, 83, 9, 0.3);
 }
 .badge-uncertain .badge-dot {
   background: var(--accent-yellow);
@@ -158,7 +159,7 @@ pre,
 .badge-reconciling {
   color: var(--accent-olive-light);
   background: var(--accent-olive-bg);
-  border: 1px solid rgba(159, 168, 85, 0.25);
+  border: 1px solid rgba(109, 125, 36, 0.3);
   animation: pulse 2s infinite ease-in-out;
 }
 .badge-processing .badge-dot,
@@ -171,7 +172,7 @@ pre,
 
 .badge-pending {
   color: var(--text-muted);
-  background: rgba(140, 147, 160, 0.1);
+  background: rgba(95, 101, 112, 0.08);
   border: 1px solid var(--border-color);
 }
 .badge-pending .badge-dot {
@@ -242,6 +243,7 @@ pre,
   display: flex;
   flex: 1;
   flex-direction: column;
+  align-items: center;
   min-width: 0;
   height: 100vh;
   overflow-y: auto;

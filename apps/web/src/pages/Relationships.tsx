@@ -51,7 +51,7 @@ function FactPreviewBox({
     return (
       <div
         style={{
-          background: "rgba(0, 0, 0, 0.2)",
+          background: "rgba(26, 29, 33, 0.03)",
           border: "1px solid var(--border-subtle)",
           borderRadius: 8,
           padding: "14px 16px",
@@ -67,7 +67,7 @@ function FactPreviewBox({
   return (
     <div
       style={{
-        background: "rgba(0, 0, 0, 0.2)",
+        background: "rgba(26, 29, 33, 0.03)",
         border: "1px solid var(--border-subtle)",
         borderRadius: 8,
         display: "flex",
@@ -95,7 +95,7 @@ function FactPreviewBox({
         </span>
         <code
           style={{
-            background: "rgba(255,255,255,0.04)",
+            background: "rgba(26, 29, 33, 0.05)",
             borderRadius: 4,
             color: "var(--accent-olive-light)",
             fontSize: 11,
@@ -456,7 +456,14 @@ export function RelationshipsPage() {
   );
 
   return (
-    <div style={{ maxWidth: 1200, padding: "32px 36px", width: "100%" }}>
+    <div
+      style={{
+        margin: "0 auto",
+        maxWidth: 1200,
+        padding: "32px 36px",
+        width: "100%",
+      }}
+    >
       {/* Header */}
       <div
         style={{
@@ -517,7 +524,7 @@ export function RelationshipsPage() {
         <div
           style={{
             background: "var(--accent-red-bg)",
-            border: "1px solid rgba(224, 108, 117, 0.3)",
+            border: "1px solid rgba(201, 58, 68, 0.35)",
             borderRadius: 8,
             color: "var(--accent-red)",
             padding: 16,

@@ -252,4 +252,34 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
         limit: t.Optional(t.String()),
       }),
     }
+  )
+  .get(
+    "/:id/file",
+    async ({ params: { id }, set }) => {
+      const [doc] = await db
+        .select({ filePath: documents.filePath })
+        .from(documents)
+        .where(eq(documents.id, id))
+        .limit(1);
+
+      if (!doc) {
+        set.status = 404;
+        return { error: `Document ${id} not found` };
+      }
+
+      const bunFile = Bun.file(doc.filePath);
+      const exists = await bunFile.exists();
+      if (!exists) {
+        set.status = 404;
+        return { error: "Document file not found on disk" };
+      }
+
+      set.headers["content-type"] = "application/pdf";
+      return bunFile;
+    },
+    {
+      params: t.Object({
+        id: t.String(),
+      }),
+    }
   );

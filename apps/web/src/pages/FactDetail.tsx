@@ -83,7 +83,7 @@ function FactPrimaryCard({ fact }: { fact: FactDetailData }) {
         <div style={{ alignItems: "center", display: "flex", gap: 8 }}>
           <code
             style={{
-              background: "rgba(255, 255, 255, 0.05)",
+              background: "rgba(109, 125, 36, 0.08)",
               borderRadius: 4,
               color: "var(--accent-olive-light)",
               fontSize: 12,
@@ -107,7 +107,7 @@ function FactPrimaryCard({ fact }: { fact: FactDetailData }) {
               confidencePct >= 90
                 ? "var(--accent-green-bg)"
                 : "var(--accent-yellow-bg)",
-            border: "1px solid rgba(152, 195, 121, 0.25)",
+            border: "1px solid rgba(47, 125, 59, 0.3)",
             borderRadius: 12,
             color:
               confidencePct >= 90
@@ -272,7 +272,7 @@ function FactPrimaryCard({ fact }: { fact: FactDetailData }) {
       {/* Source Quote Callout Box */}
       <div
         style={{
-          background: "rgba(159, 168, 85, 0.05)",
+          background: "rgba(109, 125, 36, 0.07)",
           borderLeft: "3px solid var(--accent-olive)",
           borderRadius: "0 6px 6px 0",
           marginTop: 16,
@@ -328,7 +328,7 @@ function FactRelationshipCard({
     <div
       style={{
         background: isHighlighted
-          ? "rgba(159, 168, 85, 0.08)"
+          ? "rgba(109, 125, 36, 0.08)"
           : "var(--sidebar-bg)",
         border: isHighlighted
           ? "1px solid var(--accent-olive)"
@@ -392,7 +392,7 @@ function FactRelationshipCard({
         <div
           style={{
             alignItems: "center",
-            background: "rgba(0,0,0,0.2)",
+            background: "rgba(26, 29, 33, 0.04)",
             borderRadius: 6,
             display: "flex",
             justifyContent: "space-between",
@@ -519,7 +519,7 @@ export function FactDetailPage() {
         <div
           style={{
             background: "var(--accent-red-bg)",
-            border: "1px solid rgba(224, 108, 117, 0.3)",
+            border: "1px solid rgba(201, 58, 68, 0.35)",
             borderRadius: 8,
             color: "var(--accent-red)",
             padding: 20,
@@ -564,6 +564,8 @@ export function FactDetailPage() {
         display: "flex",
         flexDirection: "column",
         height: "100%",
+        margin: "0 auto",
+        maxWidth: 1600,
         minHeight: "100vh",
         padding: "20px 28px",
         width: "100%",

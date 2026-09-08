@@ -82,7 +82,7 @@ export function UploadButton({
             background: "var(--accent-olive)",
             border: "none",
             borderRadius: 6,
-            color: "#0d0e11",
+            color: "#ffffff",
             cursor: isUploading ? "not-allowed" : "pointer",
             display: "inline-flex",
             fontSize: 13,
@@ -136,7 +136,7 @@ export function UploadButton({
         style={{
           alignItems: "center",
           background: "var(--accent-olive-bg)",
-          border: "1px solid rgba(159, 168, 85, 0.4)",
+          border: "1px solid rgba(109, 125, 36, 0.45)",
           borderRadius: 8,
           color: "var(--accent-olive-light)",
           cursor: isUploading ? "not-allowed" : "pointer",

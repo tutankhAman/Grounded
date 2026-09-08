@@ -14,6 +14,7 @@ import {
   pageChunks,
   relationships,
   type SQL,
+  sql,
 } from "@grounded/db";
 import { Elysia, t } from "elysia";
 import { parsePagination } from "../lib/pagination";
@@ -69,6 +70,7 @@ export const factRoutes = new Elysia({ prefix: "/facts" })
           predicate: facts.predicate,
           qualifiers: facts.qualifiers,
           rawValue: facts.rawValue,
+          relationshipCount: sql<number>`(SELECT count(*)::int FROM ${relationships} WHERE ${relationships.factAId} = "facts"."id" OR ${relationships.factBId} = "facts"."id")`,
           sourceChunkIndex: facts.sourceChunkIndex,
           sourcePage: facts.sourcePage,
           sourceQuote: facts.sourceQuote,
@@ -118,6 +120,7 @@ export const factRoutes = new Elysia({ prefix: "/facts" })
           predicate: facts.predicate,
           qualifiers: facts.qualifiers,
           rawValue: facts.rawValue,
+          relationshipCount: sql<number>`(SELECT count(*)::int FROM ${relationships} WHERE ${relationships.factAId} = "facts"."id" OR ${relationships.factBId} = "facts"."id")`,
           sourceChunkIndex: facts.sourceChunkIndex,
           sourcePage: facts.sourcePage,
           sourceQuote: facts.sourceQuote,

@@ -433,8 +433,8 @@ export function PDFViewer({
             alignItems: "center",
             background:
               highlightRects.length > 0
-                ? "rgba(159, 168, 85, 0.12)"
-                : "rgba(229, 192, 123, 0.12)",
+                ? "rgba(109, 125, 36, 0.12)"
+                : "rgba(180, 83, 9, 0.12)",
             borderBottom: "1px solid var(--border-color)",
             color:
               highlightRects.length > 0
@@ -467,7 +467,7 @@ export function PDFViewer({
       <div
         style={{
           alignItems: "flex-start",
-          background: "#08090b",
+          background: "#e6e8e2",
           display: "flex",
           flex: 1,
           justifyContent: "center",
@@ -515,7 +515,7 @@ export function PDFViewer({
         ) : (
           <div
             style={{
-              boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+              boxShadow: "0 8px 24px rgba(26, 29, 33, 0.18)",
               height: viewportSize.height || "auto",
               position: "relative",
               width: viewportSize.width || "auto",
@@ -547,11 +547,11 @@ export function PDFViewer({
               <title>Evidence highlights</title>
               {highlightRects.map((rect) => (
                 <rect
-                  fill="rgba(255, 230, 0, 0.4)"
+                  fill="rgba(250, 204, 21, 0.45)"
                   height={rect.height}
                   key={rect.id}
                   rx={2}
-                  stroke="rgba(230, 180, 0, 0.75)"
+                  stroke="rgba(180, 83, 9, 0.7)"
                   strokeWidth={1}
                   width={rect.width}
                   x={rect.left}

@@ -184,7 +184,14 @@ export function FactsPage() {
   }, [totalPages]);
 
   return (
-    <div style={{ maxWidth: 1200, padding: "32px 36px", width: "100%" }}>
+    <div
+      style={{
+        margin: "0 auto",
+        maxWidth: 1200,
+        padding: "32px 36px",
+        width: "100%",
+      }}
+    >
       {/* Header */}
       <div
         style={{
@@ -333,7 +340,7 @@ export function FactsPage() {
         <div
           style={{
             background: "var(--accent-red-bg)",
-            border: "1px solid rgba(224, 108, 117, 0.3)",
+            border: "1px solid rgba(201, 58, 68, 0.35)",
             borderRadius: 8,
             color: "var(--accent-red)",
             padding: 16,

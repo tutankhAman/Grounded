@@ -151,6 +151,17 @@ describe.skipIf(!dbAvailable)("POST /documents API tests", () => {
       pagination: { total: number };
     };
     expect(chunksBody.pagination).toBeDefined();
+
+    // Verify GET /documents/:id/file returns 200 with application/pdf and arrayBuffer
+    const fileRes = await app.handle(
+      new Request(`http://localhost:3000/documents/${body.id}/file`, {
+        method: "GET",
+      })
+    );
+    expect(fileRes.status).toBe(200);
+    expect(fileRes.headers.get("content-type")).toContain("application/pdf");
+    const fileBuffer = await fileRes.arrayBuffer();
+    expect(fileBuffer.byteLength).toBe(MINIMAL_VALID_PDF.length);
   });
 
   test("GET /documents/:id returns 404 for non-existent document", async () => {
@@ -161,5 +172,40 @@ describe.skipIf(!dbAvailable)("POST /documents API tests", () => {
       })
     );
     expect(res.status).toBe(404);
+  });
+
+  test("GET /documents/:id/file returns 404 for non-existent document", async () => {
+    const nonExistentId = "00000000-0000-0000-0000-000000000000";
+    const res = await app.handle(
+      new Request(`http://localhost:3000/documents/${nonExistentId}/file`, {
+        method: "GET",
+      })
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("not found");
+  });
+
+  test("GET /documents/:id/file returns 404 without leaking path when file is missing from disk", async () => {
+    const [missingDoc] = await db
+      .insert(documents)
+      .values({
+        filename: "missing.pdf",
+        filePath: "/tmp/non-existent-secret-path/missing.pdf",
+        status: "done",
+      })
+      .returning();
+    createdDocIds.push(missingDoc.id);
+
+    const res = await app.handle(
+      new Request(`http://localhost:3000/documents/${missingDoc.id}/file`, {
+        method: "GET",
+      })
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Document file not found on disk");
+    // Ensure internal server path is never leaked in response body
+    expect(JSON.stringify(body)).not.toContain("non-existent-secret-path");
   });
 });

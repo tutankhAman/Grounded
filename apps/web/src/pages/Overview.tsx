@@ -124,7 +124,14 @@ export function OverviewPage() {
   ];
 
   return (
-    <div style={{ maxWidth: 1100, padding: "32px 36px", width: "100%" }}>
+    <div
+      style={{
+        margin: "0 auto",
+        maxWidth: 1100,
+        padding: "32px 36px",
+        width: "100%",
+      }}
+    >
       {/* Header */}
       <div
         style={{
@@ -337,7 +344,7 @@ export function OverviewPage() {
           </div>
           <span
             style={{
-              background: "rgba(159, 168, 85, 0.12)",
+              background: "rgba(109, 125, 36, 0.12)",
               borderRadius: 12,
               color: "var(--accent-olive-light)",
               fontSize: 11,
@@ -418,7 +425,7 @@ export function OverviewPage() {
                         ? "none"
                         : "1px solid var(--border-color)",
                       borderRadius: 6,
-                      color: hasPinnedId ? "#0d0e11" : "var(--text-main)",
+                      color: hasPinnedId ? "#ffffff" : "var(--text-main)",
                       display: "inline-flex",
                       fontSize: 12,
                       fontWeight: 600,

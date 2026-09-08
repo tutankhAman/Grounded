@@ -53,8 +53,11 @@ function RelationshipRouteResolver() {
       <div
         style={{
           color: "var(--text-muted)",
+          margin: "60px auto",
+          maxWidth: 600,
           padding: "60px 40px",
           textAlign: "center",
+          width: "100%",
         }}
       >
         Loading relationship details...
@@ -86,8 +89,11 @@ function RelationshipRouteResolver() {
     <div
       style={{
         color: "var(--text-muted)",
+        margin: "60px auto",
+        maxWidth: 600,
         padding: "60px 40px",
         textAlign: "center",
+        width: "100%",
       }}
     >
       Redirecting to grounded evidence viewer...

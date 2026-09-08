@@ -59,7 +59,7 @@ function FactTableRow({ fact, onRowClick }: FactTableRowProps) {
       <td style={{ padding: "14px 18px" }}>
         <code
           style={{
-            background: "rgba(255, 255, 255, 0.04)",
+            background: "rgba(109, 125, 36, 0.08)",
             borderRadius: 4,
             color: "var(--accent-olive-light)",
             fontSize: 12,
@@ -110,7 +110,7 @@ function FactTableRow({ fact, onRowClick }: FactTableRowProps) {
             style={{
               alignItems: "center",
               background: "var(--accent-olive-bg)",
-              border: "1px solid rgba(159, 168, 85, 0.3)",
+              border: "1px solid rgba(109, 125, 36, 0.35)",
               borderRadius: 12,
               color: "var(--accent-olive-light)",
               display: "inline-flex",

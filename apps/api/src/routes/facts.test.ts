@@ -213,6 +213,80 @@ describe.skipIf(!dbAvailable)("Facts API routes (/facts)", () => {
       expect(json.total).toBe(3);
       expect(json.data.length).toBe(1);
     });
+
+    it("computes relationshipCount correctly (0, 1, both-sides)", async () => {
+      // 1. Verify fact3 has 0 relationships initially
+      const initRes = await app.handle(
+        new Request(`http://localhost:3000/facts?documentId=${docId}`)
+      );
+      const initJson = (await initRes.json()) as {
+        data: { id: string; relationshipCount: number }[];
+      };
+      const f3Init = initJson.data.find((f) => f.id === fact3Id);
+      expect(f3Init?.relationshipCount).toBe(0);
+
+      // 2. Verify fact1 has 1 relationship (as factA)
+      const f1Init = initJson.data.find((f) => f.id === fact1Id);
+      expect(f1Init?.relationshipCount).toBe(1);
+
+      // 3. Create a fact that participates in both sides (factA in relA, factB in relB)
+      const [bothSidesFact] = await db
+        .insert(facts)
+        .values({
+          documentId: docId,
+          entityId,
+          factTypeId,
+          predicate: "temporary_test",
+          rawValue: "test",
+          sourceChunkIndex: 0,
+          sourcePage: 1,
+          sourceQuote: "test",
+          value: "test",
+        })
+        .returning();
+
+      const [tempRelA] = await db
+        .insert(relationships)
+        .values({
+          confidence: 0.9,
+          explanation: "Temp rel where bothSidesFact is factA",
+          factAId: bothSidesFact.id,
+          factBId: fact3Id,
+          method: "rule",
+          relationType: "corroborates",
+        })
+        .returning();
+
+      const [tempRelB] = await db
+        .insert(relationships)
+        .values({
+          confidence: 0.9,
+          explanation: "Temp rel where bothSidesFact is factB",
+          factAId: fact2Id,
+          factBId: bothSidesFact.id,
+          method: "rule",
+          relationType: "corroborates",
+        })
+        .returning();
+
+      try {
+        const res = await app.handle(
+          new Request(`http://localhost:3000/facts?documentId=${docId}`)
+        );
+        expect(res.status).toBe(200);
+        const json = (await res.json()) as {
+          data: { id: string; relationshipCount: number }[];
+        };
+
+        const fBoth = json.data.find((f) => f.id === bothSidesFact.id);
+        // Participates in 2 relationships (one as factA, one as factB)
+        expect(fBoth?.relationshipCount).toBe(2);
+      } finally {
+        await db.delete(relationships).where(eq(relationships.id, tempRelA.id));
+        await db.delete(relationships).where(eq(relationships.id, tempRelB.id));
+        await db.delete(facts).where(eq(facts.id, bothSidesFact.id));
+      }
+    });
   });
 
   describe("GET /facts/:id", () => {
