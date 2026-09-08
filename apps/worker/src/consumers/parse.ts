@@ -7,6 +7,7 @@ import {
   pageChunks,
 } from "@grounded/db";
 import { publishDocumentProgress } from "../lib/redis";
+import { endStage, stageElapsedMs, startStage } from "../lib/stage-timing";
 import { streamPages } from "../pipeline/parser";
 
 export { pubRedis } from "../lib/redis";
@@ -30,6 +31,7 @@ export const processParseJob = async (
       status: "parsing",
     })
     .where(eq(documents.id, documentId));
+  startStage(documentId);
 
   let finalTotalPages = 0;
   let totalChunks = 0;
@@ -84,6 +86,7 @@ export const processParseJob = async (
 
         // 4. Fire-and-forget progress message (never await delivery)
         publishDocumentProgress(documentId, {
+          elapsedMs: stageElapsedMs(documentId),
           progress: {
             current: pageNumber,
             total: totalPages,
@@ -121,6 +124,7 @@ export const processParseJob = async (
 
     // Notify completion with actual terminal status
     publishDocumentProgress(documentId, {
+      elapsedMs: stageElapsedMs(documentId),
       errorMessage: terminalError,
       progress: {
         current: persistedPages,
@@ -160,6 +164,7 @@ export const processParseJob = async (
       .where(eq(documents.id, documentId));
 
     publishDocumentProgress(documentId, {
+      elapsedMs: stageElapsedMs(documentId),
       errorMessage,
       progress: {
         current: 0,
@@ -168,6 +173,7 @@ export const processParseJob = async (
       stage: "parse",
       status: "failed",
     });
+    endStage(documentId);
 
     throw fatalErr;
   }

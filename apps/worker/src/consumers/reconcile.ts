@@ -19,6 +19,7 @@ import {
 import dotenv from "dotenv";
 import pMap from "p-map";
 import { publishDocumentProgress } from "../lib/redis";
+import { endStage, stageElapsedMs, startStage } from "../lib/stage-timing";
 import { buildMatchEmbeddingInput, judgeFactPair } from "../pipeline/llm";
 import { ruleReconcile } from "../pipeline/matcher";
 import {
@@ -97,10 +98,14 @@ const publishProgress = (
   status: DocumentStatus
 ): void => {
   publishDocumentProgress(documentId, {
+    elapsedMs: stageElapsedMs(documentId),
     progress: { current, total },
     stage: "reconcile",
     status,
   });
+  if (status === "done" || status === "failed") {
+    endStage(documentId);
+  }
 };
 
 const toFactDetail = (row: ExistingFactRow | CandidateFactRow): FactDetail => ({
@@ -425,6 +430,7 @@ export const processReconcileJob = async (
       .update(documents)
       .set({ errorMessage: null, status: "reconciling" })
       .where(eq(documents.id, documentId));
+    startStage(documentId);
 
     publishProgress(documentId, 0, 1, "reconciling");
 

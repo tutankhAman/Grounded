@@ -113,5 +113,46 @@ describe("events pure utilities", () => {
         })
       ).toBe(false);
     });
+
+    it("accepts a valid elapsedMs and rejects malformed values", () => {
+      expect(
+        isProgressEvent({
+          elapsedMs: 12_345,
+          progress: { current: 3, total: 10 },
+          stage: "extract",
+          status: "extracting",
+        })
+      ).toBe(true);
+
+      expect(
+        isProgressEvent({
+          elapsedMs: 0,
+          progress: { current: 0, total: 10 },
+          status: "parsing",
+        })
+      ).toBe(true);
+
+      expect(
+        isProgressEvent({
+          elapsedMs: -5,
+          progress: { current: 1, total: 1 },
+          status: "parsing",
+        })
+      ).toBe(false);
+      expect(
+        isProgressEvent({
+          elapsedMs: Number.NaN,
+          progress: { current: 1, total: 1 },
+          status: "parsing",
+        })
+      ).toBe(false);
+      expect(
+        isProgressEvent({
+          elapsedMs: "soon",
+          progress: { current: 1, total: 1 },
+          status: "parsing",
+        })
+      ).toBe(false);
+    });
   });
 });

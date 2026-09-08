@@ -8,6 +8,7 @@ export interface DocumentProgress {
 }
 
 export interface DocumentStatusEvent {
+  elapsedMs?: number;
   error?: string;
   errorMessage?: string | null;
   progress?: DocumentProgress;
@@ -18,6 +19,10 @@ export interface DocumentStatusEvent {
 export interface UseDocumentStatusReturn {
   error: string | null;
   errorMessage: string | null;
+  /** Milliseconds remaining, extrapolated live so the countdown keeps moving
+   * between progress events. Null while unknown (no timed progress yet),
+   * finished, or failed. */
+  etaMs: number | null;
   isClosed: boolean;
   isConnected: boolean;
   isTerminal: boolean;
@@ -62,6 +67,14 @@ export function useDocumentStatus(
     initialStatus ? TERMINAL_STATUSES.has(initialStatus) : false
   );
   const [retryNonce, setRetryNonce] = useState(0);
+  // Last rate-derived estimate + when we received it. The displayed ETA
+  // extrapolates from here so the countdown keeps moving during long,
+  // event-quiet stretches (e.g. a 90s serial LLM batch).
+  const [etaBase, setEtaBase] = useState<{
+    etaMs: number;
+    receivedAt: number;
+  } | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -79,6 +92,7 @@ export function useDocumentStatus(
           setStatus(payload.status);
           if (TERMINAL_STATUSES.has(payload.status)) {
             setIsTerminal(true);
+            setEtaBase(null);
           }
           if (payload.status === "done") {
             queryClient.invalidateQueries({ queryKey: queryKeys.documents() });
@@ -87,6 +101,21 @@ export function useDocumentStatus(
         }
         if (payload.progress) {
           setProgress(payload.progress);
+          const { current, total } = payload.progress;
+          if (
+            typeof payload.elapsedMs === "number" &&
+            Number.isFinite(payload.elapsedMs) &&
+            payload.elapsedMs >= 0 &&
+            current > 0 &&
+            total > current
+          ) {
+            setEtaBase({
+              etaMs: (payload.elapsedMs * (total - current)) / current,
+              receivedAt: Date.now(),
+            });
+          } else {
+            setEtaBase(null);
+          }
         }
         if (payload.stage) {
           setStage(payload.stage);
@@ -108,6 +137,7 @@ export function useDocumentStatus(
     if (!documentId) {
       return;
     }
+    setEtaBase(null);
 
     if (
       initialStatus &&
@@ -147,6 +177,7 @@ export function useDocumentStatus(
       wsRef.current = null;
       setIsConnected(false);
       setIsClosed(true);
+      setEtaBase(null);
       const closeResult = parseCloseEvent(event.code);
       if (closeResult.error) {
         setError(closeResult.error);
@@ -169,9 +200,29 @@ export function useDocumentStatus(
     };
   }, [documentId, handleMessage, initialStatus, retryNonce]);
 
+  // Tick the displayed ETA once per second while an estimate is live, so the
+  // countdown moves even when no progress events arrive for a while.
+  useEffect(() => {
+    if (isTerminal || etaBase === null) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [isTerminal, etaBase]);
+
+  const etaMs =
+    etaBase === null || isTerminal
+      ? null
+      : Math.max(0, etaBase.etaMs - (nowMs - etaBase.receivedAt));
+
   return {
     error,
     errorMessage,
+    etaMs,
     isClosed,
     isConnected,
     isTerminal,

@@ -16,6 +16,7 @@ import {
 } from "@grounded/db";
 import pMap from "p-map";
 import { publishDocumentProgress } from "../lib/redis";
+import { endStage, stageElapsedMs, startStage } from "../lib/stage-timing";
 import { confirmEntityMatch, embedFactBatch } from "../pipeline/llm";
 import {
   buildEntityEmbeddingInput,
@@ -54,10 +55,14 @@ const publishProgress = (
   status: DocumentStatus
 ): void => {
   publishDocumentProgress(documentId, {
+    elapsedMs: stageElapsedMs(documentId),
     progress: { current, total },
     stage: "resolve",
     status,
   });
+  if (status === "failed") {
+    endStage(documentId);
+  }
 };
 
 interface FactRow {
@@ -308,6 +313,7 @@ export const processResolveJob = async (
     .update(documents)
     .set({ errorMessage: null, status: "resolving" })
     .where(eq(documents.id, documentId));
+  startStage(documentId);
 
   try {
     publishProgress(documentId, 0, 1, "resolving");

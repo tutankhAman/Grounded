@@ -17,6 +17,7 @@ import {
 import dotenv from "dotenv";
 import pMap from "p-map";
 import { publishDocumentProgress } from "../lib/redis";
+import { endStage, stageElapsedMs, startStage } from "../lib/stage-timing";
 import {
   applyQuoteValidation,
   assessChunk,
@@ -512,11 +513,15 @@ function publishProgress(
   errorMessage?: string | null
 ): void {
   publishDocumentProgress(documentId, {
+    elapsedMs: stageElapsedMs(documentId),
     errorMessage,
     progress: { current, total },
     stage: "extract",
     status,
   });
+  if (status === "failed") {
+    endStage(documentId);
+  }
 }
 
 async function markBatchStatus(
@@ -871,6 +876,7 @@ export const processExtractJob = async (
       .update(documents)
       .set({ errorMessage: null, status: "extracting" })
       .where(eq(documents.id, documentId));
+    startStage(documentId);
 
     await db.delete(facts).where(eq(facts.documentId, documentId));
 

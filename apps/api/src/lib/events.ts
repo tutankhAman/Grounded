@@ -80,5 +80,14 @@ export const isProgressEvent = (
     return false;
   }
 
+  if (
+    candidate.elapsedMs !== undefined &&
+    (typeof candidate.elapsedMs !== "number" ||
+      !Number.isFinite(candidate.elapsedMs) ||
+      candidate.elapsedMs < 0)
+  ) {
+    return false;
+  }
+
   return true;
 };
