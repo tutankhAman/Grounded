@@ -161,9 +161,9 @@ or `entity: ...`).
 ## 4. Pipeline Stages
 
 ### 4.1 Ingestion and parsing
-- Upload handling: Elysia's multipart body parser buffers incoming files up to the bounded `MAX_UPLOAD_MB`
-  limit (100MB default), preventing memory exhaustion while validating and writing the file. Page extraction
-  in the worker is a lazy sequential stream: `for (i = 1..numPages)` → `getPage(i)` → `getTextContent()` →
+- Upload handling: Bun/Elysia configures `maxRequestBodySize` derived from the bounded `MAX_UPLOAD_MB`
+  limit (100MB default), rejecting oversized request bodies before parsing and preventing memory exhaustion
+  while validating and writing the file. Page extraction in the worker is a lazy sequential stream: `for (i = 1..numPages)` → `getPage(i)` → `getTextContent()` →
   insert the `page_chunks` row immediately → `page.cleanup()` → `redis.publish(doc:status, {current, total})`.
   Worker extraction memory stays strictly O(1 page). Never `Promise.all()` pages. Upsert on
   `(documentId, pageNumber, chunkIndex)` so a crashed job resumes without duplicates; wrap each

@@ -189,19 +189,20 @@ export const splitOversizePage = (
   const chunks: ParsedChunk[] = [];
   let currentRuns: TextRun[] = [];
   let currentPieces: string[] = [];
+  let currentChars = 0;
 
   for (let i = 0; i < runs.length; i++) {
     const currentRun = runs[i];
     currentRuns.push(currentRun);
     currentPieces.push(currentRun.text);
+    currentChars += (currentPieces.length > 1 ? 1 : 0) + currentRun.text.length;
 
     const nextRun = runs[i + 1];
     const hasGap =
       nextRun !== undefined &&
       Math.abs(currentRun.y - nextRun.y) > gapThreshold;
 
-    const currentText = currentPieces.join(" ");
-    const currentTokens = estimateTokens(currentText);
+    const currentTokens = Math.ceil(currentChars / 4);
 
     // Split if we hit a gap and have at least 25% of split target, or if hard limit reached
     const minSplitTokens = Math.max(
@@ -213,6 +214,7 @@ export const splitOversizePage = (
       currentTokens >= thresholds.chunkTokenSplit;
 
     if (shouldSplit) {
+      const currentText = currentPieces.join(" ");
       chunks.push({
         chunkIndex: chunks.length,
         isLowText: classification.isLowText,
@@ -224,6 +226,7 @@ export const splitOversizePage = (
       });
       currentRuns = [];
       currentPieces = [];
+      currentChars = 0;
     }
   }
 

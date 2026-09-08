@@ -15,6 +15,13 @@
       "when": 1788845980575,
       "tag": "0001_fluffy_otto_octavius",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788848402537,
+      "tag": "0002_bent_thunderbird",
+      "breakpoints": true
     }
   ]
 }

@@ -1,8 +1,9 @@
 import { resolve } from "node:path";
-import { PARSE_QUEUE, type ParseJob } from "@grounded/db";
+import { type ExtractJob, PARSE_QUEUE, type ParseJob } from "@grounded/db";
 import { Worker } from "bullmq";
 import dotenv from "dotenv";
 import Redis from "ioredis";
+import { processExtractJob } from "./consumers/extract";
 import { processParseJob, pubRedis } from "./consumers/parse";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
@@ -13,16 +14,23 @@ const connection = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
 
-export const documentWorker = new Worker<ParseJob>(
+export const documentWorker = new Worker<ParseJob | ExtractJob>(
   PARSE_QUEUE,
   async (job) => {
     console.log(
       `[Worker] Started job ${job.id} (${job.name}) for document ${job.data.documentId}`
     );
     if (job.name === "parse-pdf") {
-      const result = await processParseJob(job.data);
+      const result = await processParseJob(job.data as ParseJob);
       console.log(
         `[Worker] Finished job ${job.id} — parsed ${result.totalPages} pages (${result.totalChunks} chunks)`
+      );
+      return result;
+    }
+    if (job.name === "extract-document") {
+      const result = await processExtractJob(job.data as ExtractJob);
+      console.log(
+        `[Worker] Finished job ${job.id} — extracted ${result.factsExtracted} facts (${result.chunksFailed} chunks failed)`
       );
       return result;
     }
@@ -48,13 +56,23 @@ const shutdown = async (signal: string) => {
   console.log(
     `[Worker] ${signal} received. Closing worker and Redis connections...`
   );
+  const shutdownTimer = setTimeout(() => {
+    console.error(
+      "[Worker] Shutdown deadline exceeded (10s). Forcing termination."
+    );
+    process.exit(1);
+  }, 10_000);
+  shutdownTimer.unref();
+
   try {
     await documentWorker.close();
     await pubRedis.quit();
     await connection.quit();
+    clearTimeout(shutdownTimer);
     console.log("[Worker] Graceful shutdown completed.");
     process.exit(0);
   } catch (err) {
+    clearTimeout(shutdownTimer);
     console.error("[Worker] Error during shutdown:", err);
     process.exit(1);
   }

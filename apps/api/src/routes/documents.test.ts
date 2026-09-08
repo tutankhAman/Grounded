@@ -9,8 +9,8 @@ mock.module("../lib/queue", () => ({
   }),
 }));
 
-// Import app pure after queue mock is registered
-import { app } from "../index";
+// Dynamically import app after queue mock is registered to prevent ESM hoisting
+const { app } = await import("../index");
 
 // Gate database tests if Postgres is not reachable
 let dbAvailable = false;
@@ -31,20 +31,22 @@ describe.skipIf(!dbAvailable)("POST /documents API tests", () => {
 
   afterAll(async () => {
     // Clean up created test documents from db and disk
-    for (const id of createdDocIds) {
-      const [doc] = await db
-        .select()
-        .from(documents)
-        .where(eq(documents.id, id));
-      if (doc?.filePath && existsSync(doc.filePath)) {
-        try {
-          unlinkSync(doc.filePath);
-        } catch {
-          // Ignored cleanup error
+    await Promise.all(
+      createdDocIds.map(async (id) => {
+        const [doc] = await db
+          .select()
+          .from(documents)
+          .where(eq(documents.id, id));
+        if (doc?.filePath && existsSync(doc.filePath)) {
+          try {
+            unlinkSync(doc.filePath);
+          } catch {
+            // Ignored cleanup error
+          }
         }
-      }
-      await db.delete(documents).where(eq(documents.id, id));
-    }
+        await db.delete(documents).where(eq(documents.id, id));
+      })
+    );
   });
 
   test("rejects non-PDF files with 400 Bad Request", async () => {

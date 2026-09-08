@@ -139,8 +139,11 @@ FACT_TYPE_SIMILARITY_THRESHOLD=0.85        # cosine similarity above which predi
 ENTITY_MATCH_THRESHOLD=0.80
 ```
 
-Declare a constant `EMBEDDING_DIM` (defaulting to 1536 via Gemini MRL) and reference it everywhere instead of hard-coding 1536. If you
-ever swap embedding models, one env change and one migration is enough.
+Declare a constant `EMBEDDING_DIM` (defaulting to 1536 via Gemini MRL) and reference it everywhere instead of hard-coding 1536.
+Never treat matching `EMBEDDING_DIM` values as sufficient for comparing vectors across different models; cosine similarity
+across distinct embedding spaces is meaningless. When `EMBEDDING_MODEL` changes, enforce a migration strategy: either
+re-embed all existing `entities`, `fact_types`, and `facts` vector columns via a migration job, or isolate vectors by model
+version before permitting similarity queries.
 
 ### Health check
 

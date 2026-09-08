@@ -1,6 +1,7 @@
 import { relations } from "drizzle-orm";
 import {
   boolean,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -11,6 +12,9 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
+
+// Standardized embedding dimension matching EMBEDDING_DIM env var (gemini-embedding-2 MRL 1536)
+export const EMBEDDING_DIM = 1536;
 
 export const documents = pgTable("documents", {
   errorMessage: text("error_message"),
@@ -34,6 +38,7 @@ export const pageChunks = pgTable(
     documentId: uuid("document_id")
       .notNull()
       .references(() => documents.id, { onDelete: "cascade" }),
+    extractionStatus: text("extraction_status").notNull().default("pending"), // 'pending' | 'extracted' | 'extraction_failed' | 'extraction_deferred'
     id: uuid("id").primaryKey().defaultRandom(),
     imagePath: text("image_path"),
     isLowText: boolean("is_low_text").notNull().default(false),
@@ -59,7 +64,7 @@ export const entities = pgTable("entities", {
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-  embedding: vector("embedding", { dimensions: 1536 }),
+  embedding: vector("embedding", { dimensions: EMBEDDING_DIM }),
   entityType: text("entity_type"), // organization, person, place, product, etc.
   id: uuid("id").primaryKey().defaultRandom(),
 });
@@ -84,39 +89,50 @@ export const factTypes = pgTable("fact_types", {
     .notNull()
     .defaultNow(),
   description: text("description").notNull(),
-  embedding: vector("embedding", { dimensions: 1536 }),
+  embedding: vector("embedding", { dimensions: EMBEDDING_DIM }),
   examplePredicates: jsonb("example_predicates"), // array of predicate strings
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
 });
 
-export const facts = pgTable("facts", {
-  confidence: real("confidence").notNull().default(1.0),
-  currency: text("currency"),
-  documentId: uuid("document_id")
-    .notNull()
-    .references(() => documents.id, { onDelete: "cascade" }),
-  embedding: vector("embedding", { dimensions: 1536 }),
-  entityId: uuid("entity_id").references(() => entities.id, {
-    onDelete: "set null",
-  }),
-  extractedAt: timestamp("extracted_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  factTypeId: uuid("fact_type_id").references(() => factTypes.id, {
-    onDelete: "set null",
-  }),
-  id: uuid("id").primaryKey().defaultRandom(),
-  predicate: text("predicate").notNull(),
-  qualifiers: jsonb("qualifiers"),
-  rawValue: text("raw_value").notNull(),
-  sourcePage: integer("source_page").notNull(),
-  sourceQuote: text("source_quote").notNull(),
-  sourceQuoteValid: boolean("source_quote_valid").default(true),
-  timeScope: text("time_scope"),
-  unit: text("unit"),
-  value: text("value").notNull(),
-});
+export const facts = pgTable(
+  "facts",
+  {
+    confidence: real("confidence").notNull().default(1.0),
+    currency: text("currency"),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    embedding: vector("embedding", { dimensions: EMBEDDING_DIM }),
+    entityId: uuid("entity_id").references(() => entities.id, {
+      onDelete: "set null",
+    }),
+    extractedAt: timestamp("extracted_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    factTypeId: uuid("fact_type_id").references(() => factTypes.id, {
+      onDelete: "set null",
+    }),
+    id: uuid("id").primaryKey().defaultRandom(),
+    predicate: text("predicate").notNull(),
+    qualifiers: jsonb("qualifiers"),
+    rawValue: text("raw_value").notNull(),
+    sourceChunkIndex: integer("source_chunk_index").notNull().default(0),
+    sourcePage: integer("source_page").notNull(),
+    sourceQuote: text("source_quote").notNull(),
+    sourceQuoteValid: boolean("source_quote_valid").default(true),
+    timeScope: text("time_scope"),
+    unit: text("unit"),
+    value: text("value").notNull(),
+  },
+  (table) => [
+    index("facts_doc_page_chunk_idx").on(
+      table.documentId,
+      table.sourcePage,
+      table.sourceChunkIndex
+    ),
+  ]
+);
 
 export const relationships = pgTable("relationships", {
   confidence: real("confidence").notNull().default(1.0),

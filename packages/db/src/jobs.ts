@@ -5,6 +5,10 @@ export interface ParseJob {
   filePath: string;
 }
 
+export interface ExtractJob {
+  documentId: string;
+}
+
 export interface ParserThresholds {
   chunkTokenSplit: number;
   lowTextChars: number;
@@ -21,32 +25,48 @@ export const DEFAULT_THRESHOLDS: Readonly<ParserThresholds> = Object.freeze({
   shortColWidthRatio: 0.25,
 });
 
+const parseEnvNumber = (
+  envVal: string | undefined,
+  fallback: number
+): number => {
+  if (envVal === undefined || envVal.trim() === "") {
+    return fallback;
+  }
+  const parsed = Number(envVal);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 export const getThresholds = (
   overrides?: Partial<ParserThresholds>
 ): ParserThresholds => ({
   chunkTokenSplit:
     overrides?.chunkTokenSplit ??
-    (process.env.THRESHOLD_CHUNK_TOKEN_SPLIT
-      ? Number(process.env.THRESHOLD_CHUNK_TOKEN_SPLIT)
-      : DEFAULT_THRESHOLDS.chunkTokenSplit),
+    parseEnvNumber(
+      process.env.THRESHOLD_CHUNK_TOKEN_SPLIT,
+      DEFAULT_THRESHOLDS.chunkTokenSplit
+    ),
   lowTextChars:
     overrides?.lowTextChars ??
-    (process.env.THRESHOLD_LOW_TEXT_CHARS
-      ? Number(process.env.THRESHOLD_LOW_TEXT_CHARS)
-      : DEFAULT_THRESHOLDS.lowTextChars),
+    parseEnvNumber(
+      process.env.THRESHOLD_LOW_TEXT_CHARS,
+      DEFAULT_THRESHOLDS.lowTextChars
+    ),
   lowTextMinItems:
     overrides?.lowTextMinItems ??
-    (process.env.THRESHOLD_LOW_TEXT_MIN_ITEMS
-      ? Number(process.env.THRESHOLD_LOW_TEXT_MIN_ITEMS)
-      : DEFAULT_THRESHOLDS.lowTextMinItems),
+    parseEnvNumber(
+      process.env.THRESHOLD_LOW_TEXT_MIN_ITEMS,
+      DEFAULT_THRESHOLDS.lowTextMinItems
+    ),
   numericRatio:
     overrides?.numericRatio ??
-    (process.env.THRESHOLD_NUMERIC_RATIO
-      ? Number(process.env.THRESHOLD_NUMERIC_RATIO)
-      : DEFAULT_THRESHOLDS.numericRatio),
+    parseEnvNumber(
+      process.env.THRESHOLD_NUMERIC_RATIO,
+      DEFAULT_THRESHOLDS.numericRatio
+    ),
   shortColWidthRatio:
     overrides?.shortColWidthRatio ??
-    (process.env.THRESHOLD_SHORT_COL_WIDTH_RATIO
-      ? Number(process.env.THRESHOLD_SHORT_COL_WIDTH_RATIO)
-      : DEFAULT_THRESHOLDS.shortColWidthRatio),
+    parseEnvNumber(
+      process.env.THRESHOLD_SHORT_COL_WIDTH_RATIO,
+      DEFAULT_THRESHOLDS.shortColWidthRatio
+    ),
 });
