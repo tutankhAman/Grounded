@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import {
   and,
+  type DocumentStatus,
   db,
   documents,
   entities,
@@ -91,10 +92,9 @@ const publishProgress = (
   documentId: string,
   current: number,
   total: number,
-  status: string
+  status: DocumentStatus
 ): void => {
   publishDocumentProgress(documentId, {
-    documentId,
     progress: { current, total },
     stage: "reconcile",
     status,
