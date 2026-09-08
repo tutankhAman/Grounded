@@ -7,10 +7,10 @@ Built for the Superjoin engineering-intern challenge ([brief](.context/problem.m
 
 ## Demo Video
 
-> 🎬 **[Demo video (≤ 3 min)](https://example.com/demo-video-placeholder)** — *placeholder, recording in progress.*
-> Shows one live PDF upload, then the four required cases with source evidence and engine reasoning on screen.
+> 🎬 **[Demo video (≤ 3 min)](https://youtu.be/LSV2-C85V8s)** 
 
 Live deployment: frontend on Cloudflare Pages, API + worker + Postgres + Redis on a GCP VM behind Traefik/TLS.
+at **[grounded.aamn.dev](https://grounded/aamn/dev)**
 
 ## Architecture
 
