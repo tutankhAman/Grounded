@@ -133,13 +133,13 @@ GROQ_API_KEY=
 GEMINI_API_KEY=
 PORT=3000
 UPLOAD_DIR=./uploads
-EMBEDDING_MODEL=text-embedding-3-small     # or whichever you standardize on
-EMBEDDING_DIM=1536
+EMBEDDING_MODEL=gemini-embedding-2        # Google Gemini Embedding 2
+EMBEDDING_DIM=1536                        # Matryoshka Representation Learning (MRL) output dimensionality to stay within pgvector HNSW limits (< 2000)
 FACT_TYPE_SIMILARITY_THRESHOLD=0.85        # cosine similarity above which predicates are considered the same type
 ENTITY_MATCH_THRESHOLD=0.80
 ```
 
-Declare a constant `EMBEDDING_DIM` and reference it everywhere instead of hard-coding 1536. If you
+Declare a constant `EMBEDDING_DIM` (defaulting to 1536 via Gemini MRL) and reference it everywhere instead of hard-coding 1536. If you
 ever swap embedding models, one env change and one migration is enough.
 
 ### Health check
@@ -461,22 +461,33 @@ string check, keep `sourceQuoteValid = false` with `{ visionOnly: true }`, and k
 ### Embedding
 
 After validation, generate an embedding for each fact's predicate + value + entity name (one
-concatenated string). Use OpenAI's `text-embedding-3-small` via the Vercel AI SDK `embed()`
-helper, or a self-hosted alternative — just pick one model and never mix models in the same
+concatenated string). Use Google's `gemini-embedding-2` via the Vercel AI SDK `@ai-sdk/google`
+`embed()` / `embedMany()` helper. With `outputDimensionality: 1536` (via Matryoshka Representation
+Learning), we maintain standard float4 pgvector HNSW index compatibility (< 2000 dims limit)
+and retain >98% retrieval performance while halving storage. Never mix models in the same
 vector column, or cosine similarity becomes meaningless across rows.
 
 ```typescript
-import { embed } from 'ai';
-import { openai } from '@ai-sdk/openai';
+import { embed, embedMany } from 'ai';
+import { createGoogleGenerativeAI, type GoogleEmbeddingModelOptions } from '@ai-sdk/google';
+
+const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const { embedding } = await embed({
-  model: openai.embedding('text-embedding-3-small'),
+  model: google.embedding(process.env.EMBEDDING_MODEL ?? 'gemini-embedding-2'),
   value: `${fact.entity.name} ${fact.predicate} ${fact.value}`,
+  providerOptions: {
+    google: {
+      outputDimensionality: Number(process.env.EMBEDDING_DIM ?? 1536),
+    } satisfies GoogleEmbeddingModelOptions,
+  },
 });
 ```
 
-Batch embed where possible (max 100 per call for OpenAI). Do not embed one fact at a time in a
-loop.
+Batch embed where possible via `embedMany` (max 100 per call for Gemini `:batchEmbedContents`).
+Do not embed one fact at a time in a loop. Note: `gemini-embedding-2` dropped explicit `taskType`
+parameters (which were supported in `gemini-embedding-001`); task-specific guidance or framing is
+included in the text content prefix if needed (e.g., `fact: ...` or `entity: ...`).
 
 ### `fact_types` canonicalization
 

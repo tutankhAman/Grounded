@@ -1,6 +1,6 @@
 {
-  "id": "a82080d2-7689-498e-a416-1c05e3ef7ffb",
-  "prevId": "00000000-0000-0000-0000-000000000000",
+  "id": "ebb77fed-8809-43f9-b546-92fe76e2c42d",
+  "prevId": "a82080d2-7689-498e-a416-1c05e3ef7ffb",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -425,6 +425,20 @@
           "notNull": true,
           "default": false
         },
+        "is_low_text": {
+          "name": "is_low_text",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "needs_vision": {
+          "name": "needs_vision",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "image_path": {
           "name": "image_path",
           "type": "text",
@@ -451,7 +465,35 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "page_chunks_doc_page_chunk_idx": {
+          "name": "page_chunks_doc_page_chunk_idx",
+          "columns": [
+            {
+              "expression": "document_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "chunk_index",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "page_chunks_document_id_documents_id_fk": {
           "name": "page_chunks_document_id_documents_id_fk",
