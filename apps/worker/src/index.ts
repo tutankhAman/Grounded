@@ -9,8 +9,9 @@ import { Worker } from "bullmq";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import { processExtractJob } from "./consumers/extract";
-import { processParseJob, pubRedis } from "./consumers/parse";
+import { processParseJob } from "./consumers/parse";
 import { processResolveJob } from "./consumers/resolve";
+import { pubRedis } from "./lib/redis";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
 

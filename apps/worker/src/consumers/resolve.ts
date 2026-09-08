@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import {
   and,
   db,
@@ -13,9 +12,8 @@ import {
   type ResolveJob,
   sql,
 } from "@grounded/db";
-import dotenv from "dotenv";
-import Redis from "ioredis";
 import pMap from "p-map";
+import { publishDocumentProgress } from "../lib/redis";
 import { confirmEntityMatch, embedFactBatch } from "../pipeline/llm";
 import {
   buildEntityEmbeddingInput,
@@ -24,14 +22,7 @@ import {
   type RawEntityMention,
 } from "../pipeline/resolver";
 
-dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
-
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
-
-export const pubRedis = new Redis(redisUrl, {
-  enableOfflineQueue: false,
-  lazyConnect: true,
-});
+export { pubRedis } from "../lib/redis";
 
 export interface ResolveResult {
   documentId: string;
@@ -54,29 +45,17 @@ export interface ProcessResolveOptions {
 
 const BACKFILL_CHUNK_SIZE = 250;
 
-const publishProgress = async (
+const publishProgress = (
   documentId: string,
-  progress: number,
+  current: number,
+  total: number,
   status: string
-): Promise<void> => {
-  try {
-    if (pubRedis.status === "wait") {
-      await pubRedis.connect().catch(() => {
-        // Ignored: best-effort redis connection
-      });
-    }
-    await pubRedis.publish(
-      `doc:${documentId}:status`,
-      JSON.stringify({
-        documentId,
-        progress,
-        stage: "resolve",
-        status,
-      })
-    );
-  } catch {
-    // Non-blocking progress reporting
-  }
+): void => {
+  publishDocumentProgress(documentId, {
+    progress: { current, total },
+    stage: "resolve",
+    status,
+  });
 };
 
 interface FactRow {
@@ -245,125 +224,141 @@ export const processResolveJob = async (
     .set({ errorMessage: null, status: "resolving" })
     .where(eq(documents.id, documentId));
 
-  await publishProgress(documentId, 0, "resolving");
+  try {
+    publishProgress(documentId, 0, 1, "resolving");
 
-  // Idempotency: clear previous aliases and fact links for this document
-  await db
-    .delete(entityAliases)
-    .where(eq(entityAliases.documentId, documentId));
-  await db
-    .update(facts)
-    .set({ entityId: null })
-    .where(eq(facts.documentId, documentId));
+    // Idempotency: clear previous aliases and fact links for this document
+    await db
+      .delete(entityAliases)
+      .where(eq(entityAliases.documentId, documentId));
+    await db
+      .update(facts)
+      .set({ entityId: null })
+      .where(eq(facts.documentId, documentId));
 
-  const docFacts = await db
-    .select({
-      id: facts.id,
-      qualifiers: facts.qualifiers,
-      sourceQuote: facts.sourceQuote,
-    })
-    .from(facts)
-    .where(eq(facts.documentId, documentId));
+    const docFacts = await db
+      .select({
+        id: facts.id,
+        qualifiers: facts.qualifiers,
+        sourceQuote: facts.sourceQuote,
+      })
+      .from(facts)
+      .where(eq(facts.documentId, documentId));
 
-  if (docFacts.length === 0) {
+    if (docFacts.length === 0) {
+      await db
+        .update(documents)
+        .set({ errorMessage: null, status: "resolved" })
+        .where(eq(documents.id, documentId));
+      publishProgress(documentId, 1, 1, "resolved");
+
+      return {
+        documentId,
+        entitiesResolved: 0,
+        factsLinked: 0,
+        success: true,
+      };
+    }
+
+    // 1. Within-document resolution (clustering)
+    const mentions = extractMentionsFromFacts(docFacts);
+    const clusters = clusterSurfaceForms(mentions, {
+      embeddingThreshold: matchThreshold,
+      stringThreshold,
+    });
+
+    // 2. Embed canonical names + context samples for all clusters
+    const clusterInputs = clusters.map((c) =>
+      buildEntityEmbeddingInput(c.canonicalName, c.contextSample)
+    );
+    const embeddings = await embedFn(clusterInputs);
+
+    // 3. Across-document resolution & persistence
+    let factsLinkedCount = 0;
+
+    await pMap(
+      clusters,
+      async (cluster, i) => {
+        const embedding = embeddings[i];
+        if (!embedding) {
+          return;
+        }
+
+        const matchedId = await findMatchingEntity(
+          cluster,
+          embedding,
+          matchThreshold,
+          confirmFn
+        );
+
+        await persistCluster(documentId, cluster, embedding, matchedId);
+        factsLinkedCount += cluster.factIds.length;
+
+        publishProgress(documentId, i + 1, clusters.length, "resolving");
+      },
+      { concurrency: 2 }
+    );
+
+    // Fallback check: guarantee every fact has non-null entityId
+    const unlinked = await db
+      .select({ id: facts.id })
+      .from(facts)
+      .where(and(eq(facts.documentId, documentId), isNull(facts.entityId)));
+
+    if (unlinked.length > 0) {
+      const [fallbackEntity] = await db
+        .insert(entities)
+        .values({
+          canonicalName: "Unresolved Entity",
+          contextSample: "Fallback entity for unlinked facts",
+          entityType: "unknown",
+        })
+        .returning({ id: entities.id });
+
+      if (fallbackEntity) {
+        const unlinkedIds = unlinked.map((u) => u.id);
+        const unlinkedPromises: Promise<unknown>[] = [];
+        for (let j = 0; j < unlinkedIds.length; j += BACKFILL_CHUNK_SIZE) {
+          const chunk = unlinkedIds.slice(j, j + BACKFILL_CHUNK_SIZE);
+          unlinkedPromises.push(
+            db
+              .update(facts)
+              .set({ entityId: fallbackEntity.id })
+              .where(inArray(facts.id, chunk))
+          );
+        }
+        await Promise.all(unlinkedPromises);
+        factsLinkedCount += unlinked.length;
+      }
+    }
+
     await db
       .update(documents)
       .set({ errorMessage: null, status: "resolved" })
       .where(eq(documents.id, documentId));
-    await publishProgress(documentId, 100, "resolved");
+
+    publishProgress(documentId, clusters.length, clusters.length, "resolved");
 
     return {
       documentId,
-      entitiesResolved: 0,
-      factsLinked: 0,
+      entitiesResolved: clusters.length,
+      factsLinked: factsLinkedCount,
       success: true,
     };
-  }
+  } catch (fatalErr: unknown) {
+    const errorMessage =
+      fatalErr instanceof Error ? fatalErr.message : "Unknown resolve error";
 
-  // 1. Within-document resolution (clustering)
-  const mentions = extractMentionsFromFacts(docFacts);
-  const clusters = clusterSurfaceForms(mentions, {
-    embeddingThreshold: matchThreshold,
-    stringThreshold,
-  });
-
-  // 2. Embed canonical names + context samples for all clusters
-  const clusterInputs = clusters.map((c) =>
-    buildEntityEmbeddingInput(c.canonicalName, c.contextSample)
-  );
-  const embeddings = await embedFn(clusterInputs);
-
-  // 3. Across-document resolution & persistence
-  let factsLinkedCount = 0;
-
-  await pMap(
-    clusters,
-    async (cluster, i) => {
-      const embedding = embeddings[i];
-      if (!embedding) {
-        return;
-      }
-
-      const matchedId = await findMatchingEntity(
-        cluster,
-        embedding,
-        matchThreshold,
-        confirmFn
-      );
-
-      await persistCluster(documentId, cluster, embedding, matchedId);
-      factsLinkedCount += cluster.factIds.length;
-
-      const progressPct = Math.round(((i + 1) / clusters.length) * 100);
-      await publishProgress(documentId, progressPct, "resolving");
-    },
-    { concurrency: 2 }
-  );
-
-  // Fallback check: guarantee every fact has non-null entityId
-  const unlinked = await db
-    .select({ id: facts.id })
-    .from(facts)
-    .where(and(eq(facts.documentId, documentId), isNull(facts.entityId)));
-
-  if (unlinked.length > 0) {
-    const [fallbackEntity] = await db
-      .insert(entities)
-      .values({
-        canonicalName: "Unresolved Entity",
-        contextSample: "Fallback entity for unlinked facts",
-        entityType: "unknown",
+    await db
+      .update(documents)
+      .set({
+        errorMessage,
+        status: "failed",
       })
-      .returning({ id: entities.id });
+      .where(eq(documents.id, documentId));
 
-    if (fallbackEntity) {
-      const unlinkedIds = unlinked.map((u) => u.id);
-      const unlinkedPromises: Promise<unknown>[] = [];
-      for (let j = 0; j < unlinkedIds.length; j += BACKFILL_CHUNK_SIZE) {
-        const chunk = unlinkedIds.slice(j, j + BACKFILL_CHUNK_SIZE);
-        unlinkedPromises.push(
-          db
-            .update(facts)
-            .set({ entityId: fallbackEntity.id })
-            .where(inArray(facts.id, chunk))
-        );
-      }
-      await Promise.all(unlinkedPromises);
-      factsLinkedCount += unlinked.length;
-    }
+    publishProgress(documentId, 0, 1, "failed");
+
+    throw fatalErr;
   }
-
-  await db
-    .update(documents)
-    .set({ errorMessage: null, status: "resolved" })
-    .where(eq(documents.id, documentId));
-
-  await publishProgress(documentId, 100, "resolved");
-
-  return {
-    documentId,
-    entitiesResolved: clusters.length,
-    factsLinked: factsLinkedCount,
-    success: true,
-  };
 };

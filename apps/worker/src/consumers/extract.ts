@@ -15,6 +15,7 @@ import {
 } from "@grounded/db";
 import dotenv from "dotenv";
 import pMap from "p-map";
+import { publishDocumentProgress } from "../lib/redis";
 import {
   applyQuoteValidation,
   assessChunk,
@@ -35,7 +36,6 @@ import {
   type PageBatchItem,
 } from "../pipeline/llm";
 import { imagePathToDataUrl, renderBatchImages } from "../pipeline/renderer";
-import { pubRedis } from "./parse";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 
@@ -417,17 +417,11 @@ function publishProgress(
   total: number,
   status: string
 ): void {
-  pubRedis
-    .publish(
-      `doc:${documentId}:status`,
-      JSON.stringify({
-        progress: { current, total },
-        status,
-      })
-    )
-    .catch((_err) => {
-      // Ignored: fire-and-forget
-    });
+  publishDocumentProgress(documentId, {
+    progress: { current, total },
+    stage: "extract",
+    status,
+  });
 }
 
 async function markBatchStatus(
@@ -760,12 +754,6 @@ export const processExtractJob = async (
     .update(documents)
     .set({ errorMessage: null, status: "extracting" })
     .where(eq(documents.id, documentId));
-
-  if (pubRedis.status === "wait") {
-    await pubRedis.connect().catch((_err) => {
-      // Ignored: best-effort
-    });
-  }
 
   await db.delete(facts).where(eq(facts.documentId, documentId));
 
