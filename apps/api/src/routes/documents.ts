@@ -65,7 +65,7 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
 
       // 4. Stream write with cleanup on failure
       try {
-        await globalThis.Bun.write(targetPath, file.stream());
+        await globalThis.Bun.write(targetPath, file);
       } catch {
         try {
           await unlink(targetPath);
