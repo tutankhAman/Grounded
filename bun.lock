@@ -75,8 +75,10 @@
       "name": "@grounded/db",
       "version": "0.1.0",
       "dependencies": {
+        "bullmq": "^5.41.6",
         "dotenv": "^16.4.7",
         "drizzle-orm": "^0.45.2",
+        "ioredis": "^5.6.0",
         "postgres": "^3.4.5",
         "zod": "^4.5.4",
       },
