@@ -8,6 +8,8 @@ import {
   BatchExtractionResultSchema,
   EMBEDDING_DIM,
   type EntityConfirm,
+  type ReconciliationResult,
+  ReconciliationResultSchema,
 } from "@grounded/db";
 import { embedMany, generateObject, generateText } from "ai";
 import { rateLimitedFetch } from "../lib/rate-limit";
@@ -15,6 +17,11 @@ import {
   EXTRACTION_SYSTEM_PROMPT,
   parseFallbackBatchOutput,
 } from "./extractor";
+import {
+  buildJudgePrompt,
+  type FactDetail,
+  parseJudgeResponse,
+} from "./reconciler";
 import { buildEntityConfirmPrompt, parseConfirmResponse } from "./resolver";
 
 export class ExtractionFailedError extends Error {
@@ -384,11 +391,13 @@ const embedWithRetry = async (
 };
 
 const fetchAndCacheMissing = async (
-  missingValues: string[]
+  missingValues: string[],
+  customTaskType?: string
 ): Promise<number[][]> => {
   const modelName = process.env.EMBEDDING_MODEL ?? "gemini-embedding-001";
   const dim = Number(process.env.EMBEDDING_DIM ?? EMBEDDING_DIM);
-  const taskType = process.env.EMBEDDING_TASK_DOC ?? "RETRIEVAL_DOCUMENT";
+  const taskType =
+    customTaskType ?? process.env.EMBEDDING_TASK_DOC ?? "RETRIEVAL_DOCUMENT";
   const BATCH_SIZE = 100;
   const fetched: number[][] = [];
 
@@ -432,9 +441,10 @@ const fetchAndCacheMissing = async (
     for (let j = 0; j < batch.length; j++) {
       const val = batch[j];
       const emb = rawEmbeddings[j];
-      if (emb) {
+      if (emb && val) {
         const normalized = l2Normalize(emb);
-        setInEmbeddingCache(val, normalized);
+        const cacheKey = customTaskType ? `${customTaskType}:${val}` : val;
+        setInEmbeddingCache(cacheKey, normalized);
         fetched.push(normalized);
       }
     }
@@ -443,7 +453,10 @@ const fetchAndCacheMissing = async (
   return fetched;
 };
 
-export const embedFactBatch = async (inputs: string[]): Promise<number[][]> => {
+export const embedFactBatch = async (
+  inputs: string[],
+  options?: { taskType?: string }
+): Promise<number[][]> => {
   if (inputs.length === 0) {
     return [];
   }
@@ -454,7 +467,11 @@ export const embedFactBatch = async (inputs: string[]): Promise<number[][]> => {
 
   for (let i = 0; i < inputs.length; i++) {
     const text = inputs[i];
-    const cached = embeddingCache.get(text);
+    if (!text) {
+      continue;
+    }
+    const cacheKey = options?.taskType ? `${options.taskType}:${text}` : text;
+    const cached = embeddingCache.get(cacheKey);
     if (cached) {
       results[i] = cached;
     } else {
@@ -464,7 +481,10 @@ export const embedFactBatch = async (inputs: string[]): Promise<number[][]> => {
   }
 
   if (missingValues.length > 0) {
-    const fetched = await fetchAndCacheMissing(missingValues);
+    const fetched = await fetchAndCacheMissing(
+      missingValues,
+      options?.taskType
+    );
     for (let k = 0; k < missingIndices.length; k++) {
       const origIdx = missingIndices[k];
       const emb = fetched[k];
@@ -515,4 +535,102 @@ export const confirmEntityMatch = async (params: {
   });
 
   return parseConfirmResponse(result.text);
+};
+
+/**
+ * Builds canonical fact matching embedding input string:
+ * e.g. "fact: Acme Corp revenue $4.2M"
+ */
+export const buildMatchEmbeddingInput = (fact: {
+  entityName?: string | null;
+  predicate: string;
+  value: string;
+}): string => {
+  const entityPart = fact.entityName?.trim()
+    ? `${fact.entityName.trim()} `
+    : "";
+  return `fact: ${entityPart}${fact.predicate.trim()} ${fact.value.trim()}`;
+};
+
+export interface JudgeFactPairOptions {
+  docA?: { filename: string } | null;
+  docB?: { filename: string } | null;
+  model?: string;
+  thinkingBudget?: number;
+}
+
+/**
+ * Calls LLM judge to classify and explain the relationship between two facts.
+ * Falls back to generateText + parser if structured object fails.
+ * Never throws away a pair on failure; returns uncertain with explanation.
+ */
+export const judgeFactPair = async (
+  pair: { factA: FactDetail; factB: FactDetail },
+  options?: JudgeFactPairOptions
+): Promise<ReconciliationResult> => {
+  const provider = getChatProvider();
+  const modelName =
+    options?.model ??
+    process.env.JUDGE_MODEL ??
+    process.env.TEXT_MODEL ??
+    "gemini-3.5-flash-lite";
+  const model = provider(modelName);
+  const thinkingBudget =
+    options?.thinkingBudget ?? Number(process.env.JUDGE_THINKING_BUDGET ?? "0");
+
+  const prompt = buildJudgePrompt({
+    docA: options?.docA,
+    docB: options?.docB,
+    factA: pair.factA,
+    factB: pair.factB,
+  });
+
+  const system =
+    "You are a fact reconciliation judge. Given two facts about the same entity from different documents, determine their relationship and explain it in plain language.";
+
+  try {
+    const result = await generateObject({
+      maxRetries: 2,
+      model,
+      prompt,
+      providerOptions: {
+        google: {
+          thinking: {
+            budgetTokens: thinkingBudget,
+          },
+        },
+      },
+      schema: ReconciliationResultSchema,
+      system,
+      temperature: 0,
+    });
+
+    return result.object;
+  } catch {
+    try {
+      const textResult = await generateText({
+        maxRetries: 2,
+        model,
+        prompt: `${prompt}\n\nRespond with a valid JSON object matching {"relationType": "corroborates"|"contradicts"|"reconciled"|"uncertain", "explanation": "...", "confidence": 0.0-1.0}`,
+        providerOptions: {
+          google: {
+            thinking: {
+              budgetTokens: thinkingBudget,
+            },
+          },
+        },
+        system,
+        temperature: 0,
+      });
+
+      return parseJudgeResponse(textResult.text);
+    } catch (textErr: unknown) {
+      const msg = textErr instanceof Error ? textErr.message : String(textErr);
+      return {
+        confidence: 0.2,
+        explanation: `Judge call failed: ${msg}`,
+        relationType: "uncertain",
+      };
+    }
+  }
 };
