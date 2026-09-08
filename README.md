@@ -68,12 +68,12 @@ flowchart TB
   confirmed by a lightweight LLM check before merging into canonical entities.
 4. **Reconcile** — cheap-first, two tiers:
   ```mermaid
-   flowchart LR
-       P[new fact × candidate pair] --> R{rule engine:\nscope · units · multipliers · exact match}
-       R -->|decided| S[store relationship\n+ explanation, 0 LLM tokens]
-       R -->|ambiguous| J[LLM judge]
-       J --> S2[store corroborates |\ncontradicts | reconciled |\nuncertain + reasoning]
-       J -->|judge errors| U[stored as uncertain\nwith error text, never hidden]
+    flowchart LR
+        P[new fact × candidate pair] --> R{rule engine:\nscope · units · multipliers · exact match}
+        R -->|decided| S[store relationship\n+ explanation, 0 LLM tokens]
+        R -->|ambiguous| J[LLM judge]
+        J --> S2["store corroborates |\ncontradicts | reconciled |\nuncertain + reasoning"]
+        J -->|judge errors| U[stored as uncertain\nwith error text, never hidden]
   ```
 
 
