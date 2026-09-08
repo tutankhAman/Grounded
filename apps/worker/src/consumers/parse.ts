@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import {
   addExtractJob,
   db,
@@ -7,17 +6,10 @@ import {
   type ParseJob,
   pageChunks,
 } from "@grounded/db";
-import dotenv from "dotenv";
-import Redis from "ioredis";
+import { publishDocumentProgress } from "../lib/redis";
 import { streamPages } from "../pipeline/parser";
 
-dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
-
-const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
-export const pubRedis = new Redis(redisUrl, {
-  lazyConnect: true,
-  maxRetriesPerRequest: null,
-});
+export { pubRedis } from "../lib/redis";
 
 export interface ParseResult {
   documentId: string;
@@ -38,13 +30,6 @@ export const processParseJob = async (
       status: "parsing",
     })
     .where(eq(documents.id, documentId));
-
-  // Connect pub redis if needed
-  if (pubRedis.status === "wait") {
-    await pubRedis.connect().catch((_err) => {
-      // Ignored: pub/sub delivery is best-effort
-    });
-  }
 
   let finalTotalPages = 0;
   let totalChunks = 0;
@@ -98,20 +83,14 @@ export const processParseJob = async (
         persistedPages++;
 
         // 4. Fire-and-forget progress message (never await delivery)
-        pubRedis
-          .publish(
-            `doc:${documentId}:status`,
-            JSON.stringify({
-              progress: {
-                current: pageNumber,
-                total: totalPages,
-              },
-              status: "parsing",
-            })
-          )
-          .catch((_err) => {
-            // Ignored: fire-and-forget
-          });
+        publishDocumentProgress(documentId, {
+          progress: {
+            current: pageNumber,
+            total: totalPages,
+          },
+          stage: "parse",
+          status: "parsing",
+        });
       } catch (pageErr: unknown) {
         failedPages.push(pageNumber);
         const message =
@@ -141,21 +120,15 @@ export const processParseJob = async (
       .where(eq(documents.id, documentId));
 
     // Notify completion with actual terminal status
-    pubRedis
-      .publish(
-        `doc:${documentId}:status`,
-        JSON.stringify({
-          errorMessage: terminalError,
-          progress: {
-            current: persistedPages,
-            total: finalTotalPages,
-          },
-          status: terminalStatus,
-        })
-      )
-      .catch((_err) => {
-        // Ignored: fire-and-forget
-      });
+    publishDocumentProgress(documentId, {
+      errorMessage: terminalError,
+      progress: {
+        current: persistedPages,
+        total: finalTotalPages,
+      },
+      stage: "parse",
+      status: terminalStatus,
+    });
 
     // Enqueue extraction on success (chaining)
     try {
@@ -186,17 +159,15 @@ export const processParseJob = async (
       })
       .where(eq(documents.id, documentId));
 
-    pubRedis
-      .publish(
-        `doc:${documentId}:status`,
-        JSON.stringify({
-          error: errorMessage,
-          status: "failed",
-        })
-      )
-      .catch((_err) => {
-        // Ignored: fire-and-forget
-      });
+    publishDocumentProgress(documentId, {
+      errorMessage,
+      progress: {
+        current: 0,
+        total: 1,
+      },
+      stage: "parse",
+      status: "failed",
+    });
 
     throw fatalErr;
   }

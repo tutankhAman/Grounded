@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
@@ -22,7 +22,7 @@ export const documents = pgTable("documents", {
   filePath: text("file_path").notNull(),
   id: uuid("id").primaryKey().defaultRandom(),
   pageCount: integer("page_count"),
-  status: text("status").notNull().default("pending"), // 'pending' | 'parsing' | 'parsed' | 'extracting' | 'extracted' | 'resolving' | 'reconciling' | 'done' | 'failed'
+  status: text("status").notNull().default("pending"), // 'pending' | 'parsing' | 'parsed' | 'extracting' | 'extracted' | 'resolving' | 'resolved' | 'reconciling' | 'done' | 'failed'
   uploadedAt: timestamp("uploaded_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -58,16 +58,24 @@ export const pageChunks = pgTable(
   ]
 );
 
-export const entities = pgTable("entities", {
-  canonicalName: text("canonical_name").notNull(),
-  contextSample: text("context_sample"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  embedding: vector("embedding", { dimensions: EMBEDDING_DIM }),
-  entityType: text("entity_type"), // organization, person, place, product, etc.
-  id: uuid("id").primaryKey().defaultRandom(),
-});
+export const entities = pgTable(
+  "entities",
+  {
+    canonicalName: text("canonical_name").notNull(),
+    contextSample: text("context_sample"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    embedding: vector("embedding", { dimensions: EMBEDDING_DIM }),
+    entityType: text("entity_type"), // organization, person, place, product, etc.
+    id: uuid("id").primaryKey().defaultRandom(),
+  },
+  (table) => [
+    uniqueIndex("entities_canonical_name_lower_idx").on(
+      sql`lower(${table.canonicalName})`
+    ),
+  ]
+);
 
 export const entityAliases = pgTable("entity_aliases", {
   confidence: real("confidence").default(1.0),

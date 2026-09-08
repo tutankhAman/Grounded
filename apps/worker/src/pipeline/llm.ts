@@ -7,6 +7,7 @@ import {
   type BatchExtractedFact,
   BatchExtractionResultSchema,
   EMBEDDING_DIM,
+  type EntityConfirm,
 } from "@grounded/db";
 import { embedMany, generateObject, generateText } from "ai";
 import { rateLimitedFetch } from "../lib/rate-limit";
@@ -14,6 +15,7 @@ import {
   EXTRACTION_SYSTEM_PROMPT,
   parseFallbackBatchOutput,
 } from "./extractor";
+import { buildEntityConfirmPrompt, parseConfirmResponse } from "./resolver";
 
 export class ExtractionFailedError extends Error {
   readonly rawOutput?: string;
@@ -481,4 +483,36 @@ export const embedSingle = async (input: string): Promise<number[]> => {
     throw new Error("Failed to generate embedding for input");
   }
   return embedding;
+};
+
+/**
+ * Cross-document confirmation call using lightweight Flash-Lite with thinkingBudget: 0.
+ * Confirms whether two similar entities refer to the same real-world entity.
+ */
+export const confirmEntityMatch = async (params: {
+  contextA?: string | null;
+  contextB?: string | null;
+  nameA: string;
+  nameB: string;
+}): Promise<EntityConfirm> => {
+  const provider = getChatProvider();
+  const modelName = process.env.TEXT_MODEL ?? "gemini-3.5-flash-lite";
+  const model = provider(modelName);
+  const prompt = buildEntityConfirmPrompt(params);
+
+  const result = await generateText({
+    maxRetries: 2,
+    model,
+    prompt,
+    providerOptions: {
+      google: {
+        thinking: {
+          budgetTokens: 0,
+        },
+      },
+    },
+    temperature: 0,
+  });
+
+  return parseConfirmResponse(result.text);
 };

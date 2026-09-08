@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import {
+  addResolveJob,
   asc,
   type BatchExtractedFact,
   db,
@@ -14,6 +15,7 @@ import {
 } from "@grounded/db";
 import dotenv from "dotenv";
 import pMap from "p-map";
+import { publishDocumentProgress } from "../lib/redis";
 import {
   applyQuoteValidation,
   assessChunk,
@@ -34,7 +36,6 @@ import {
   type PageBatchItem,
 } from "../pipeline/llm";
 import { imagePathToDataUrl, renderBatchImages } from "../pipeline/renderer";
-import { pubRedis } from "./parse";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 
@@ -58,7 +59,8 @@ export interface ProcessExtractOptions {
 
 function normalizeExtractedFact(
   raw: Record<string, unknown>,
-  defaultPageNumber: number
+  defaultPageNumber: number,
+  viaVision?: boolean
 ): BatchExtractedFact {
   return {
     confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
@@ -83,6 +85,7 @@ function normalizeExtractedFact(
     timeScope: typeof raw.timeScope === "string" ? raw.timeScope : undefined,
     unit: typeof raw.unit === "string" ? raw.unit : undefined,
     value: String(raw.value ?? ""),
+    viaVision: typeof raw.viaVision === "boolean" ? raw.viaVision : viaVision,
   };
 }
 
@@ -329,7 +332,7 @@ async function escalateTablePageIfNeeded(
     const visionFacts = options?.visionExtractor
       ? await options.visionExtractor(
           dataUrl,
-          batchItem.pageNumber.toString(),
+          batchItem.pageNumber,
           batchItem.text
         )
       : await extractVisionPage(
@@ -345,7 +348,7 @@ async function escalateTablePageIfNeeded(
 
     const resultFacts = [...currentFacts];
     for (const vf of visionFacts) {
-      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber));
+      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber, true));
     }
     return { facts: resultFacts, visionEscalated: true };
   } catch (escErr) {
@@ -394,7 +397,11 @@ async function processVisionGroup(
 
   const normalizedVisionFacts: BatchExtractedFact[] = rawVisionResult.map(
     (f, idx) =>
-      normalizeExtractedFact(f, validPageNums[idx % validPageNums.length] ?? 1)
+      normalizeExtractedFact(
+        f,
+        validPageNums[idx % validPageNums.length] ?? 1,
+        true
+      )
   );
 
   const { validFacts } = validateBatchResult(
@@ -410,17 +417,11 @@ function publishProgress(
   total: number,
   status: string
 ): void {
-  pubRedis
-    .publish(
-      `doc:${documentId}:status`,
-      JSON.stringify({
-        progress: { current, total },
-        status,
-      })
-    )
-    .catch((_err) => {
-      // Ignored: fire-and-forget
-    });
+  publishDocumentProgress(documentId, {
+    progress: { current, total },
+    stage: "extract",
+    status,
+  });
 }
 
 async function markBatchStatus(
@@ -624,7 +625,6 @@ async function processAllVisionPages(
 async function cloneDuplicateFacts(
   duplicatePageMap: Map<number, number>,
   allExtractedFacts: BatchExtractedFact[],
-  visionFactPageNumbers: Set<number>,
   pageMap: Map<number, PageData>,
   onProgress: (doneDelta: number) => void
 ): Promise<void> {
@@ -634,9 +634,6 @@ async function cloneDuplicateFacts(
     );
     for (const cf of canonicalFacts) {
       allExtractedFacts.push({ ...cf, pageNumber: dupPageNum });
-      if (visionFactPageNumbers.has(canonicalPageNum)) {
-        visionFactPageNumbers.add(dupPageNum);
-      }
     }
     const dupPageData = pageMap.get(dupPageNum);
     if (dupPageData) {
@@ -652,7 +649,6 @@ async function cloneDuplicateFacts(
 async function persistExtractedFacts(
   documentId: string,
   allExtractedFacts: BatchExtractedFact[],
-  visionFactPageNumbers: Set<number>,
   pageMap: Map<number, PageData>,
   getOrCanonicalizeFactType: (
     description: string,
@@ -662,7 +658,7 @@ async function persistExtractedFacts(
   const validatedFacts = allExtractedFacts.map((fact) => {
     const pageData = pageMap.get(fact.pageNumber);
     const pageRawText = pageData?.rawText ?? "";
-    const isVision = visionFactPageNumbers.has(fact.pageNumber);
+    const isVision = Boolean(fact.viaVision);
     return applyQuoteValidation(fact, pageRawText, isVision);
   });
 
@@ -698,7 +694,13 @@ async function persistExtractedFacts(
       fact.qualifiers
     )
       ? Object.fromEntries(fact.qualifiers.map((q) => [q.key, q.value]))
-      : ((fact.qualifiers as Record<string, unknown> | null) ?? {});
+      : { ...((fact.qualifiers as Record<string, unknown> | null) ?? {}) };
+
+    qualifiersRecord._entity = {
+      context: fact.entity.context,
+      name: fact.entity.name,
+      type: fact.entity.type,
+    };
 
     return {
       confidence: fact.confidence,
@@ -752,12 +754,6 @@ export const processExtractJob = async (
     .update(documents)
     .set({ errorMessage: null, status: "extracting" })
     .where(eq(documents.id, documentId));
-
-  if (pubRedis.status === "wait") {
-    await pubRedis.connect().catch((_err) => {
-      // Ignored: best-effort
-    });
-  }
 
   await db.delete(facts).where(eq(facts.documentId, documentId));
 
@@ -818,10 +814,7 @@ export const processExtractJob = async (
       .where(inArray(pageChunks.id, deferredChunkIds));
   }
 
-  const [
-    { batchFacts, visionFactPageNumbers: textVisionPages },
-    { visionFacts, visionPageNumbers: directVisionPages },
-  ] = await Promise.all([
+  const [{ batchFacts }, { visionFacts }] = await Promise.all([
     processTextBatches(
       documentId,
       doc.filePath,
@@ -841,15 +834,10 @@ export const processExtractJob = async (
   ]);
 
   const allExtractedFacts = [...batchFacts, ...visionFacts];
-  const visionFactPageNumbers = new Set([
-    ...textVisionPages,
-    ...directVisionPages,
-  ]);
 
   await cloneDuplicateFacts(
     duplicatePageMap,
     allExtractedFacts,
-    visionFactPageNumbers,
     pageMap,
     (doneDelta) => updateProgress(doneDelta, 0)
   );
@@ -872,7 +860,6 @@ export const processExtractJob = async (
   const factsExtracted = await persistExtractedFacts(
     documentId,
     allExtractedFacts,
-    visionFactPageNumbers,
     pageMap,
     getOrCanonicalizeFactType
   );
@@ -883,6 +870,12 @@ export const processExtractJob = async (
     .where(eq(documents.id, documentId));
 
   publishProgress(documentId, totalChunks, totalChunks, "extracted");
+
+  try {
+    await addResolveJob({ documentId });
+  } catch {
+    // Ignored: best-effort queueing
+  }
 
   return {
     chunksFailed,
