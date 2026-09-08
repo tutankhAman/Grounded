@@ -575,13 +575,19 @@ async function processTextBatches(
 }> {
   const targetOutputTokens =
     Number(process.env.EXTRACT_TARGET_OUTPUT_TOKENS) || 14_000;
+  // Width cap forces parallelism on dense decks whose estimates undercount
+  // table output: same tokens spread over concurrent batches instead of one
+  // serial mega-call (wall-clock ≈ slowest single batch).
+  const maxPagesPerBatch =
+    Number(process.env.EXTRACT_MAX_PAGES_PER_BATCH) || 15;
   const packedTextBatches = packPages(
     textPages.map((p) => ({
       pageNumber: p.pageNumber,
       text: p.compactedText,
       tokenEstimate: Math.ceil(p.compactedText.length / 4),
     })),
-    targetOutputTokens
+    targetOutputTokens,
+    maxPagesPerBatch
   );
 
   const allExtractedFacts: BatchExtractedFact[] = [];

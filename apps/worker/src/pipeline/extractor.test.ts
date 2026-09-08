@@ -294,6 +294,25 @@ describe("extractor pure layer unit tests", () => {
     expect(singleRight).toEqual([]);
   });
 
+  test("16. packPages maxPagesPerBatch forces parallelism on dense decks", () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({
+      pageNumber: i + 1,
+      text: `Page ${i + 1}`,
+      tokenEstimate: 100,
+    }));
+    // Budget alone would fit all 10 in one batch; the width cap splits them.
+    const batches = packPages(pages, 42_000, 4);
+    expect(batches.length).toBe(3);
+    expect(batches.flat().length).toBe(10);
+    expect(batches.map((b) => b.map((p) => p.pageNumber))).toEqual([
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+      [9, 10],
+    ]);
+    // Default (unbounded) preserves old behavior.
+    expect(packPages(pages, 42_000).length).toBe(1);
+  });
+
   test("14. quoteLengthBucket + summarizeQuoteLengths bucket observed lengths (never enforced)", () => {
     expect(quoteLengthBucket(50)).toBe("0-100");
     expect(quoteLengthBucket(100)).toBe("0-100");

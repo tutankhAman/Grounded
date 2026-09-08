@@ -269,10 +269,15 @@ export const duplicateTripleRate = (
 /**
  * Order-preserving packing of pages into batches under targetOutputTokens.
  * Small documents collapse into 1 batch. An oversize loner gets its own batch.
+ * maxPagesPerBatch caps batch width so dense decks spread across parallel
+ * slots instead of one serial mega-call: output tokens are constant, but
+ * wall-clock ≈ slowest single batch. Defaults to unbounded (callers pass the
+ * cap); existing unit tests pin explicit budgets and are unaffected.
  */
 export const packPages = (
   pages: PageToPack[],
-  targetOutputTokens = 42_000
+  targetOutputTokens = 42_000,
+  maxPagesPerBatch = Number.POSITIVE_INFINITY
 ): PageToPack[][] => {
   if (pages.length === 0) {
     return [];
@@ -298,7 +303,8 @@ export const packPages = (
 
     if (
       currentBatch.length > 0 &&
-      currentTokens + pageOutputTokens > targetOutputTokens
+      (currentTokens + pageOutputTokens > targetOutputTokens ||
+        currentBatch.length >= maxPagesPerBatch)
     ) {
       batches.push(currentBatch);
       currentBatch = [page];
