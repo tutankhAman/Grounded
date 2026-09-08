@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import {
   DEFAULT_THRESHOLDS,
   getThresholds,
@@ -54,7 +53,7 @@ export interface PageStreamResult {
   totalPages: number;
 }
 
-const NUMERIC_TOKEN_REGEX = /^[\d,.$%/\-+():]+$/;
+const NUMERIC_TOKEN_REGEX = /^[0-9.,%$€£₹+-]+$/;
 
 export const estimateTokens = (text: string): number =>
   Math.ceil(text.length / 4);
@@ -82,6 +81,7 @@ export const runsFromTextContent = (
     const x = Number(transform[4]) || 0;
     const y = Number(transform[5]) || 0;
     const width = Number(ti.width) || 0;
+    // Fallback: transform[0] reflects horizontal scale / font size for standard upright text
     const height = Number(ti.height) || Math.abs(Number(transform[0])) || 0;
     const fontName = typeof ti.fontName === "string" ? ti.fontName : "";
 
@@ -203,9 +203,13 @@ export const splitOversizePage = (
     const currentText = currentPieces.join(" ");
     const currentTokens = estimateTokens(currentText);
 
-    // Split if we hit a gap and have at least 1000 tokens, or if hard limit reached
+    // Split if we hit a gap and have at least 25% of split target, or if hard limit reached
+    const minSplitTokens = Math.max(
+      250,
+      Math.floor(thresholds.chunkTokenSplit / 4)
+    );
     const shouldSplit =
-      (hasGap && currentTokens >= 1500) ||
+      (hasGap && currentTokens >= minSplitTokens) ||
       currentTokens >= thresholds.chunkTokenSplit;
 
     if (shouldSplit) {
@@ -240,12 +244,12 @@ export const splitOversizePage = (
 };
 
 export async function* streamPages(
-  _documentId: string,
   filePath: string,
   overrides?: Partial<ParserThresholds>
 ): AsyncGenerator<PageStreamResult> {
   const thresholds = getThresholds(overrides);
-  const fileBytes = new Uint8Array(readFileSync(filePath));
+  const buf = await globalThis.Bun.file(filePath).arrayBuffer();
+  const fileBytes = new Uint8Array(buf);
   const pdf = await getDocumentProxy(fileBytes);
 
   try {
@@ -293,6 +297,14 @@ export async function* streamPages(
       typeof (pdf as unknown as { cleanup?: () => void }).cleanup === "function"
     ) {
       (pdf as unknown as { cleanup: () => void }).cleanup();
+    }
+    if (
+      typeof (pdf as unknown as { destroy?: () => Promise<void> | void })
+        .destroy === "function"
+    ) {
+      await (
+        pdf as unknown as { destroy: () => Promise<void> | void }
+      ).destroy();
     }
   }
 }

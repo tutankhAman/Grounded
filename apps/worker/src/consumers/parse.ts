@@ -44,7 +44,7 @@ export const processParseJob = async (
 
   try {
     // 2. Stream pages lazily with O(1-page) memory
-    for await (const pageResult of streamPages(documentId, filePath)) {
+    for await (const pageResult of streamPages(filePath)) {
       const { totalPages, chunks, pageNumber } = pageResult;
       finalTotalPages = totalPages;
 

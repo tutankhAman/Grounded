@@ -50,7 +50,10 @@ async function runTuning() {
     let totalTokens = 0;
     let pageCount = 0;
 
-    for await (const page of streamPages("tune-doc", pdfPath)) {
+    let maxHeapBytes = process.memoryUsage().heapUsed;
+
+    for await (const page of streamPages(pdfPath)) {
+      maxHeapBytes = Math.max(maxHeapBytes, process.memoryUsage().heapUsed);
       pageCount = page.totalPages;
       const c = page.chunks[0];
       totalTokens += c.tokenEstimate;
@@ -99,69 +102,87 @@ async function runTuning() {
     `\n--- Running End-to-End Ingestion on: ${targetPdf.split("/").pop()} ---`
   );
 
-  const [doc] = await db
-    .insert(documents)
-    .values({
-      filename: "e2e-test-presentation.pdf",
+  let docId: string | null = null;
+  try {
+    const [doc] = await db
+      .insert(documents)
+      .values({
+        filename: "e2e-test-presentation.pdf",
+        filePath: targetPdf,
+        status: "pending",
+        uploadedAt: new Date(),
+      })
+      .returning();
+    docId = doc.id;
+
+    const startTime = performance.now();
+    const initialMemory = process.memoryUsage().heapUsed;
+
+    const result = await processParseJob({
+      documentId: doc.id,
       filePath: targetPdf,
-      status: "pending",
-      uploadedAt: new Date(),
-    })
-    .returning();
+    });
 
-  const startTime = performance.now();
-  const initialMemory = process.memoryUsage().heapUsed;
-
-  const result = await processParseJob({
-    documentId: doc.id,
-    filePath: targetPdf,
-  });
-
-  const durationMs = Math.round(performance.now() - startTime);
-  const peakMemoryMb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-
-  console.log(`\nProcessing completed in ${durationMs}ms`);
-  console.log(
-    `Heap Memory: ${peakMemoryMb}MB (initial: ${Math.round(initialMemory / 1024 / 1024)}MB)`
-  );
-  console.log(
-    `Total Pages Parsed: ${result.totalPages}, Total Chunks Persisted: ${result.totalChunks}`
-  );
-
-  // Query database to verify persistence
-  const [updatedDoc] = await db
-    .select()
-    .from(documents)
-    .where(eq(documents.id, doc.id));
-  console.log(
-    `Document DB status: ${updatedDoc.status}, pageCount: ${updatedDoc.pageCount}`
-  );
-
-  const storedChunks = await db
-    .select()
-    .from(pageChunks)
-    .where(eq(pageChunks.documentId, doc.id));
-
-  console.log(`Stored page_chunks in DB: ${storedChunks.length}`);
-
-  // Inspect first chunk position data
-  const sampleChunk = storedChunks[0];
-  const sampleRuns = (sampleChunk?.positionData as any[]) || [];
-  console.log(`Sample Chunk 1 runs count: ${sampleRuns.length}`);
-  if (sampleRuns.length > 0) {
-    console.log(
-      `Sample Run 1 coordinates: x=${sampleRuns[0].x}, y=${sampleRuns[0].y}, w=${sampleRuns[0].width}, h=${sampleRuns[0].height}, text="${sampleRuns[0].text}"`
+    const durationMs = Math.round(performance.now() - startTime);
+    const peakMemoryMb = Math.round(
+      process.memoryUsage().heapUsed / 1024 / 1024
     );
-  }
 
-  // Clean up test document
-  await db.delete(documents).where(eq(documents.id, doc.id));
-  console.log(
-    "\nCleaned up test document. Verification finished successfully."
-  );
+    console.log(`\nProcessing completed in ${durationMs}ms`);
+    console.log(
+      `Heap Memory: ${peakMemoryMb}MB (initial: ${Math.round(initialMemory / 1024 / 1024)}MB)`
+    );
+    console.log(
+      `Total Pages Parsed: ${result.totalPages}, Total Chunks Persisted: ${result.totalChunks}`
+    );
+
+    // Query database to verify persistence
+    const [updatedDoc] = await db
+      .select()
+      .from(documents)
+      .where(eq(documents.id, doc.id));
+    console.log(
+      `Document DB status: ${updatedDoc.status}, pageCount: ${updatedDoc.pageCount}`
+    );
+
+    const storedChunks = await db
+      .select()
+      .from(pageChunks)
+      .where(eq(pageChunks.documentId, doc.id));
+
+    console.log(`Stored page_chunks in DB: ${storedChunks.length}`);
+
+    // Inspect first chunk position data
+    const sampleChunk = storedChunks[0];
+    const sampleRuns = (sampleChunk?.positionData as unknown[]) || [];
+    console.log(`Sample Chunk 1 runs count: ${sampleRuns.length}`);
+    if (sampleRuns.length > 0) {
+      const firstRun = sampleRuns[0] as {
+        height: number;
+        text: string;
+        width: number;
+        x: number;
+        y: number;
+      };
+      console.log(
+        `Sample Run 1 coordinates: x=${firstRun.x}, y=${firstRun.y}, w=${firstRun.width}, h=${firstRun.height}, text="${firstRun.text}"`
+      );
+    }
+  } finally {
+    if (docId) {
+      await db.delete(documents).where(eq(documents.id, docId));
+      console.log(
+        "\nCleaned up test document. Verification finished successfully."
+      );
+    }
+  }
 }
 
-runTuning().catch((err) => {
-  console.error("Tuning script failed:", err);
-  process.exit(1);
-});
+runTuning()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error("Tuning script failed:", err);
+    process.exit(1);
+  });
