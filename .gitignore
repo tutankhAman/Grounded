@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+.cache/
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# App specific
+uploads/
+coverage/
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
