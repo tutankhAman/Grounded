@@ -81,6 +81,10 @@ export const BatchExtractedFactSchema = ExtractedFactSchema.extend({
     .int()
     .min(1)
     .describe("1-based page number where this fact appears"),
+  viaVision: z
+    .boolean()
+    .nullish()
+    .describe("Whether this fact was produced by a vision model"),
 });
 
 export const BatchExtractionResultSchema = z.object({

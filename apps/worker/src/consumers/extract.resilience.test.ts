@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { BatchExtractedFact } from "@grounded/db";
 import { TokenBucketRateLimiter } from "../lib/rate-limit";
 import {
+  applyQuoteValidation,
   assessChunk,
   compactText,
   findRepeatedStrings,
@@ -242,6 +244,54 @@ describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
       expect(active.uniquePages.length).toBe(3);
       expect(active.duplicatePageMap.get(4)).toBe(1);
       expect(active.uniquePages[0].compactedText).toBe("Page 1 content");
+    });
+
+    test("applyQuoteValidation retains valid quotes on text facts even on escalated pages", () => {
+      const pageRawText =
+        "The company reported net revenue of $50 million for the quarter.";
+
+      const textFact: BatchExtractedFact = {
+        confidence: 0.95,
+        entity: { context: "The company context", name: "Acme", type: "org" },
+        factTypeDescription: "financial metric",
+        pageNumber: 1,
+        predicate: "revenue",
+        qualifiers: {},
+        rawValue: "$50 million",
+        sourceQuote: "net revenue of $50 million",
+        value: "50000000",
+        viaVision: false,
+      };
+
+      const visionFact: BatchExtractedFact = {
+        confidence: 0.85,
+        entity: { context: "The company context", name: "Acme", type: "org" },
+        factTypeDescription: "financial metric",
+        pageNumber: 1,
+        predicate: "ebitda",
+        qualifiers: {},
+        rawValue: "$15M",
+        sourceQuote: "from table cell 3",
+        value: "15000000",
+        viaVision: true,
+      };
+
+      const validatedText = applyQuoteValidation(
+        textFact,
+        pageRawText,
+        Boolean(textFact.viaVision)
+      );
+      expect(validatedText.sourceQuoteValid).toBe(true);
+      expect(validatedText.fact.confidence).toBe(0.95);
+      expect(validatedText.fact.qualifiers.visionOnly).toBeUndefined();
+
+      const validatedVision = applyQuoteValidation(
+        visionFact,
+        pageRawText,
+        Boolean(visionFact.viaVision)
+      );
+      expect(validatedVision.sourceQuoteValid).toBe(false);
+      expect(validatedVision.fact.qualifiers.visionOnly).toBe(true);
     });
   });
 });

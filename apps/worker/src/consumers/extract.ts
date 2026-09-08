@@ -59,7 +59,8 @@ export interface ProcessExtractOptions {
 
 function normalizeExtractedFact(
   raw: Record<string, unknown>,
-  defaultPageNumber: number
+  defaultPageNumber: number,
+  viaVision?: boolean
 ): BatchExtractedFact {
   return {
     confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
@@ -84,6 +85,7 @@ function normalizeExtractedFact(
     timeScope: typeof raw.timeScope === "string" ? raw.timeScope : undefined,
     unit: typeof raw.unit === "string" ? raw.unit : undefined,
     value: String(raw.value ?? ""),
+    viaVision: typeof raw.viaVision === "boolean" ? raw.viaVision : viaVision,
   };
 }
 
@@ -330,7 +332,7 @@ async function escalateTablePageIfNeeded(
     const visionFacts = options?.visionExtractor
       ? await options.visionExtractor(
           dataUrl,
-          batchItem.pageNumber.toString(),
+          batchItem.pageNumber,
           batchItem.text
         )
       : await extractVisionPage(
@@ -346,7 +348,7 @@ async function escalateTablePageIfNeeded(
 
     const resultFacts = [...currentFacts];
     for (const vf of visionFacts) {
-      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber));
+      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber, true));
     }
     return { facts: resultFacts, visionEscalated: true };
   } catch (escErr) {
@@ -395,7 +397,11 @@ async function processVisionGroup(
 
   const normalizedVisionFacts: BatchExtractedFact[] = rawVisionResult.map(
     (f, idx) =>
-      normalizeExtractedFact(f, validPageNums[idx % validPageNums.length] ?? 1)
+      normalizeExtractedFact(
+        f,
+        validPageNums[idx % validPageNums.length] ?? 1,
+        true
+      )
   );
 
   const { validFacts } = validateBatchResult(
@@ -625,7 +631,6 @@ async function processAllVisionPages(
 async function cloneDuplicateFacts(
   duplicatePageMap: Map<number, number>,
   allExtractedFacts: BatchExtractedFact[],
-  visionFactPageNumbers: Set<number>,
   pageMap: Map<number, PageData>,
   onProgress: (doneDelta: number) => void
 ): Promise<void> {
@@ -635,9 +640,6 @@ async function cloneDuplicateFacts(
     );
     for (const cf of canonicalFacts) {
       allExtractedFacts.push({ ...cf, pageNumber: dupPageNum });
-      if (visionFactPageNumbers.has(canonicalPageNum)) {
-        visionFactPageNumbers.add(dupPageNum);
-      }
     }
     const dupPageData = pageMap.get(dupPageNum);
     if (dupPageData) {
@@ -653,7 +655,6 @@ async function cloneDuplicateFacts(
 async function persistExtractedFacts(
   documentId: string,
   allExtractedFacts: BatchExtractedFact[],
-  visionFactPageNumbers: Set<number>,
   pageMap: Map<number, PageData>,
   getOrCanonicalizeFactType: (
     description: string,
@@ -663,7 +664,7 @@ async function persistExtractedFacts(
   const validatedFacts = allExtractedFacts.map((fact) => {
     const pageData = pageMap.get(fact.pageNumber);
     const pageRawText = pageData?.rawText ?? "";
-    const isVision = visionFactPageNumbers.has(fact.pageNumber);
+    const isVision = Boolean(fact.viaVision);
     return applyQuoteValidation(fact, pageRawText, isVision);
   });
 
@@ -825,10 +826,7 @@ export const processExtractJob = async (
       .where(inArray(pageChunks.id, deferredChunkIds));
   }
 
-  const [
-    { batchFacts, visionFactPageNumbers: textVisionPages },
-    { visionFacts, visionPageNumbers: directVisionPages },
-  ] = await Promise.all([
+  const [{ batchFacts }, { visionFacts }] = await Promise.all([
     processTextBatches(
       documentId,
       doc.filePath,
@@ -848,15 +846,10 @@ export const processExtractJob = async (
   ]);
 
   const allExtractedFacts = [...batchFacts, ...visionFacts];
-  const visionFactPageNumbers = new Set([
-    ...textVisionPages,
-    ...directVisionPages,
-  ]);
 
   await cloneDuplicateFacts(
     duplicatePageMap,
     allExtractedFacts,
-    visionFactPageNumbers,
     pageMap,
     (doneDelta) => updateProgress(doneDelta, 0)
   );
@@ -879,7 +872,6 @@ export const processExtractJob = async (
   const factsExtracted = await persistExtractedFacts(
     documentId,
     allExtractedFacts,
-    visionFactPageNumbers,
     pageMap,
     getOrCanonicalizeFactType
   );
