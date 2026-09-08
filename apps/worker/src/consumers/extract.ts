@@ -3,6 +3,7 @@ import {
   addResolveJob,
   asc,
   type BatchExtractedFact,
+  type DocumentStatus,
   db,
   documents,
   type ExtractJob,
@@ -52,7 +53,7 @@ export interface ProcessExtractOptions {
   textExtractor?: (rawText: string) => Promise<Record<string, unknown>[]>;
   visionExtractor?: (
     images: string[] | string,
-    pageNumbersOrHint?: number[] | string,
+    pageNumbersOrHint?: number[] | number | string,
     hint?: string
   ) => Promise<Record<string, unknown>[]>;
 }
@@ -415,9 +416,11 @@ function publishProgress(
   documentId: string,
   current: number,
   total: number,
-  status: string
+  status: DocumentStatus,
+  errorMessage?: string | null
 ): void {
   publishDocumentProgress(documentId, {
+    errorMessage,
     progress: { current, total },
     stage: "extract",
     status,
@@ -750,137 +753,154 @@ export const processExtractJob = async (
     throw new Error(`Document ${documentId} not found in database.`);
   }
 
-  await db
-    .update(documents)
-    .set({ errorMessage: null, status: "extracting" })
-    .where(eq(documents.id, documentId));
+  try {
+    await db
+      .update(documents)
+      .set({ errorMessage: null, status: "extracting" })
+      .where(eq(documents.id, documentId));
 
-  await db.delete(facts).where(eq(facts.documentId, documentId));
+    await db.delete(facts).where(eq(facts.documentId, documentId));
 
-  const chunks = await db
-    .select()
-    .from(pageChunks)
-    .where(eq(pageChunks.documentId, documentId))
-    .orderBy(asc(pageChunks.pageNumber), asc(pageChunks.chunkIndex));
+    const chunks = await db
+      .select()
+      .from(pageChunks)
+      .where(eq(pageChunks.documentId, documentId))
+      .orderBy(asc(pageChunks.pageNumber), asc(pageChunks.chunkIndex));
 
-  const totalChunks = chunks.length;
-  if (totalChunks === 0) {
+    const totalChunks = chunks.length;
+    if (totalChunks === 0) {
+      await db
+        .update(documents)
+        .set({ errorMessage: null, status: "extracted" })
+        .where(eq(documents.id, documentId));
+      return {
+        chunksFailed: 0,
+        documentId,
+        factsExtracted: 0,
+        totalPages: doc.pageCount ?? 0,
+      };
+    }
+
+    publishProgress(documentId, 0, totalChunks, "extracting");
+
+    const pageMap = groupChunksByPage(chunks);
+    const pages = Array.from(pageMap.values()).sort(
+      (a, b) => a.pageNumber - b.pageNumber
+    );
+    const { duplicatePageMap, uniquePages } = deduplicatePages(
+      pages,
+      options?.skipBoilerplate
+    );
+    const { deferredChunkIds, skippedChunkIds, textPages, visionPages } =
+      categorizePages(uniquePages);
+
+    let doneChunks = 0;
+    let chunksFailed = 0;
+    const updateProgress = (doneDelta: number, failedDelta = 0) => {
+      doneChunks = Math.min(totalChunks, doneChunks + doneDelta);
+      chunksFailed += failedDelta;
+      publishProgress(documentId, doneChunks, totalChunks, "extracting");
+    };
+
+    if (skippedChunkIds.length > 0) {
+      updateProgress(skippedChunkIds.length, 0);
+      await db
+        .update(pageChunks)
+        .set({ extractionStatus: "extracted" })
+        .where(inArray(pageChunks.id, skippedChunkIds));
+    }
+
+    if (deferredChunkIds.length > 0) {
+      updateProgress(deferredChunkIds.length, 0);
+      await db
+        .update(pageChunks)
+        .set({ extractionStatus: "extraction_deferred" })
+        .where(inArray(pageChunks.id, deferredChunkIds));
+    }
+
+    const [{ batchFacts }, { visionFacts }] = await Promise.all([
+      processTextBatches(
+        documentId,
+        doc.filePath,
+        textPages,
+        pageMap,
+        updateProgress,
+        options
+      ),
+      processAllVisionPages(
+        documentId,
+        doc.filePath,
+        visionPages,
+        pageMap,
+        updateProgress,
+        options
+      ),
+    ]);
+
+    const allExtractedFacts = [...batchFacts, ...visionFacts];
+
+    await cloneDuplicateFacts(
+      duplicatePageMap,
+      allExtractedFacts,
+      pageMap,
+      (doneDelta) => updateProgress(doneDelta, 0)
+    );
+
+    const canonicalizeCache = new Map<string, Promise<string>>();
+    const getOrCanonicalizeFactType = (
+      description: string,
+      predicate: string
+    ): Promise<string> => {
+      const key = description.trim().toLowerCase();
+      const existing = canonicalizeCache.get(key);
+      if (existing) {
+        return existing;
+      }
+      const promise = canonicalizeFactType(description, predicate);
+      canonicalizeCache.set(key, promise);
+      return promise;
+    };
+
+    const factsExtracted = await persistExtractedFacts(
+      documentId,
+      allExtractedFacts,
+      pageMap,
+      getOrCanonicalizeFactType
+    );
+
     await db
       .update(documents)
       .set({ errorMessage: null, status: "extracted" })
       .where(eq(documents.id, documentId));
-    return {
-      chunksFailed: 0,
-      documentId,
-      factsExtracted: 0,
-      totalPages: doc.pageCount ?? 0,
-    };
-  }
 
-  publishProgress(documentId, 0, totalChunks, "extracting");
+    publishProgress(documentId, totalChunks, totalChunks, "extracted");
 
-  const pageMap = groupChunksByPage(chunks);
-  const pages = Array.from(pageMap.values()).sort(
-    (a, b) => a.pageNumber - b.pageNumber
-  );
-  const { duplicatePageMap, uniquePages } = deduplicatePages(
-    pages,
-    options?.skipBoilerplate
-  );
-  const { deferredChunkIds, skippedChunkIds, textPages, visionPages } =
-    categorizePages(uniquePages);
-
-  let doneChunks = 0;
-  let chunksFailed = 0;
-  const updateProgress = (doneDelta: number, failedDelta = 0) => {
-    doneChunks = Math.min(totalChunks, doneChunks + doneDelta);
-    chunksFailed += failedDelta;
-    publishProgress(documentId, doneChunks, totalChunks, "extracting");
-  };
-
-  if (skippedChunkIds.length > 0) {
-    updateProgress(skippedChunkIds.length, 0);
-    await db
-      .update(pageChunks)
-      .set({ extractionStatus: "extracted" })
-      .where(inArray(pageChunks.id, skippedChunkIds));
-  }
-
-  if (deferredChunkIds.length > 0) {
-    updateProgress(deferredChunkIds.length, 0);
-    await db
-      .update(pageChunks)
-      .set({ extractionStatus: "extraction_deferred" })
-      .where(inArray(pageChunks.id, deferredChunkIds));
-  }
-
-  const [{ batchFacts }, { visionFacts }] = await Promise.all([
-    processTextBatches(
-      documentId,
-      doc.filePath,
-      textPages,
-      pageMap,
-      updateProgress,
-      options
-    ),
-    processAllVisionPages(
-      documentId,
-      doc.filePath,
-      visionPages,
-      pageMap,
-      updateProgress,
-      options
-    ),
-  ]);
-
-  const allExtractedFacts = [...batchFacts, ...visionFacts];
-
-  await cloneDuplicateFacts(
-    duplicatePageMap,
-    allExtractedFacts,
-    pageMap,
-    (doneDelta) => updateProgress(doneDelta, 0)
-  );
-
-  const canonicalizeCache = new Map<string, Promise<string>>();
-  const getOrCanonicalizeFactType = (
-    description: string,
-    predicate: string
-  ): Promise<string> => {
-    const key = description.trim().toLowerCase();
-    const existing = canonicalizeCache.get(key);
-    if (existing) {
-      return existing;
+    try {
+      await addResolveJob({ documentId });
+    } catch {
+      // Ignored: best-effort queueing
     }
-    const promise = canonicalizeFactType(description, predicate);
-    canonicalizeCache.set(key, promise);
-    return promise;
-  };
 
-  const factsExtracted = await persistExtractedFacts(
-    documentId,
-    allExtractedFacts,
-    pageMap,
-    getOrCanonicalizeFactType
-  );
+    return {
+      chunksFailed,
+      documentId,
+      factsExtracted,
+      totalPages: doc.pageCount ?? pages.length,
+    };
+  } catch (fatalErr: unknown) {
+    const errorMessage =
+      fatalErr instanceof Error ? fatalErr.message : "Unknown extract error";
 
-  await db
-    .update(documents)
-    .set({ errorMessage: null, status: "extracted" })
-    .where(eq(documents.id, documentId));
+    await db
+      .update(documents)
+      .set({
+        errorMessage,
+        status: "failed",
+      })
+      .where(eq(documents.id, documentId));
 
-  publishProgress(documentId, totalChunks, totalChunks, "extracted");
+    publishProgress(documentId, 0, 1, "failed", errorMessage);
 
-  try {
-    await addResolveJob({ documentId });
-  } catch {
-    // Ignored: best-effort queueing
+    throw fatalErr;
   }
-
-  return {
-    chunksFailed,
-    documentId,
-    factsExtracted,
-    totalPages: doc.pageCount ?? pages.length,
-  };
 };

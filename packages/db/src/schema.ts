@@ -142,22 +142,28 @@ export const facts = pgTable(
   ]
 );
 
-export const relationships = pgTable("relationships", {
-  confidence: real("confidence").notNull().default(1.0),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  explanation: text("explanation").notNull(),
-  factAId: uuid("fact_a_id")
-    .notNull()
-    .references(() => facts.id, { onDelete: "cascade" }),
-  factBId: uuid("fact_b_id")
-    .notNull()
-    .references(() => facts.id, { onDelete: "cascade" }),
-  id: uuid("id").primaryKey().defaultRandom(),
-  method: text("method").notNull(), // 'rule' | 'llm_judge' | 'both'
-  relationType: text("relation_type").notNull(), // 'corroborates' | 'contradicts' | 'reconciled' | 'uncertain'
-});
+export const relationships = pgTable(
+  "relationships",
+  {
+    confidence: real("confidence").notNull().default(1.0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    explanation: text("explanation").notNull(),
+    factAId: uuid("fact_a_id")
+      .notNull()
+      .references(() => facts.id, { onDelete: "cascade" }),
+    factBId: uuid("fact_b_id")
+      .notNull()
+      .references(() => facts.id, { onDelete: "cascade" }),
+    id: uuid("id").primaryKey().defaultRandom(),
+    method: text("method").notNull(), // 'rule' | 'llm_judge' | 'both'
+    relationType: text("relation_type").notNull(), // 'corroborates' | 'contradicts' | 'reconciled' | 'uncertain'
+  },
+  (table) => [
+    uniqueIndex("relationships_fact_a_b_idx").on(table.factAId, table.factBId),
+  ]
+);
 
 // Relations definitions
 export const documentsRelations = relations(documents, ({ many }) => ({

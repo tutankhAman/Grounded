@@ -9,6 +9,7 @@ export {
   isNotNull,
   isNull,
   like,
+  ne,
   not,
   or,
   type SQL,
@@ -17,5 +18,6 @@ export {
 export * from "./client";
 export * from "./extraction-schema";
 export * from "./jobs";
+export * from "./progress";
 export * from "./queue";
 export * from "./schema";

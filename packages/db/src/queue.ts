@@ -6,7 +6,9 @@ import {
   type ExtractJob,
   PARSE_QUEUE,
   type ParseJob,
+  RECONCILE_JOB_NAME,
   RESOLVE_JOB_NAME,
+  type ReconcileJob,
   type ResolveJob,
 } from "./jobs";
 
@@ -21,7 +23,7 @@ export const queueConnection = new Redis(redisUrl, {
 });
 
 export const documentProcessingQueue = new Queue<
-  ParseJob | ExtractJob | ResolveJob
+  ParseJob | ExtractJob | ResolveJob | ReconcileJob
 >(PARSE_QUEUE, {
   connection: queueConnection,
   defaultJobOptions: {
@@ -49,6 +51,11 @@ export const addExtractJob = async (job: ExtractJob): Promise<string> => {
 
 export const addResolveJob = async (job: ResolveJob): Promise<string> => {
   const result = await documentProcessingQueue.add(RESOLVE_JOB_NAME, job);
+  return result.id ?? "";
+};
+
+export const addReconcileJob = async (job: ReconcileJob): Promise<string> => {
+  const result = await documentProcessingQueue.add(RECONCILE_JOB_NAME, job);
   return result.id ?? "";
 };
 

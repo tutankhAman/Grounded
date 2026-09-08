@@ -12,19 +12,11 @@ export const pubRedis = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
 
-export interface DocumentProgressEvent {
-  errorMessage?: string | null;
-  progress: {
-    current: number;
-    total: number;
-  };
-  stage?: "extract" | "parse" | "reconcile" | "resolve";
-  status: string;
-}
+export type { DocumentProgressEvent } from "@grounded/db";
 
 export const publishDocumentProgress = (
   documentId: string,
-  event: DocumentProgressEvent
+  event: import("@grounded/db").DocumentProgressEvent
 ): void => {
   if (pubRedis.status === "wait") {
     pubRedis.connect().catch(() => {

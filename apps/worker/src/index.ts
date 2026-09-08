@@ -3,6 +3,7 @@ import {
   type ExtractJob,
   PARSE_QUEUE,
   type ParseJob,
+  type ReconcileJob,
   type ResolveJob,
 } from "@grounded/db";
 import { Worker } from "bullmq";
@@ -10,6 +11,7 @@ import dotenv from "dotenv";
 import Redis from "ioredis";
 import { processExtractJob } from "./consumers/extract";
 import { processParseJob } from "./consumers/parse";
+import { processReconcileJob } from "./consumers/reconcile";
 import { processResolveJob } from "./consumers/resolve";
 import { pubRedis } from "./lib/redis";
 
@@ -21,7 +23,9 @@ const connection = new Redis(redisUrl, {
   maxRetriesPerRequest: null,
 });
 
-export const documentWorker = new Worker<ParseJob | ExtractJob | ResolveJob>(
+export const documentWorker = new Worker<
+  ParseJob | ExtractJob | ResolveJob | ReconcileJob
+>(
   PARSE_QUEUE,
   async (job) => {
     console.log(
@@ -45,6 +49,13 @@ export const documentWorker = new Worker<ParseJob | ExtractJob | ResolveJob>(
       const result = await processResolveJob(job.data as ResolveJob);
       console.log(
         `[Worker] Finished job ${job.id} — resolved ${result.entitiesResolved} entities (${result.factsLinked} facts linked)`
+      );
+      return result;
+    }
+    if (job.name === "reconcile-document") {
+      const result = await processReconcileJob(job.data as ReconcileJob);
+      console.log(
+        `[Worker] Finished job ${job.id} — matched ${result.factsMatched} facts, evaluated ${result.pairsEvaluated} pairs (rule: ${result.ruleResolved}, judge: ${result.judgeCalls}), created ${result.relationshipsCreated} relationships`
       );
       return result;
     }

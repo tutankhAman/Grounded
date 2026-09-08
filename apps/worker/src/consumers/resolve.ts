@@ -1,5 +1,7 @@
 import {
+  addReconcileJob,
   and,
+  type DocumentStatus,
   db,
   documents,
   entities,
@@ -49,7 +51,7 @@ const publishProgress = (
   documentId: string,
   current: number,
   total: number,
-  status: string
+  status: DocumentStatus
 ): void => {
   publishDocumentProgress(documentId, {
     progress: { current, total },
@@ -392,6 +394,16 @@ export const processResolveJob = async (
       .where(eq(documents.id, documentId));
 
     publishProgress(documentId, clusters.length, clusters.length, "resolved");
+
+    try {
+      await addReconcileJob({ documentId });
+    } catch (queueErr) {
+      console.error(
+        `[Resolve] Failed to queue reconcile job for document ${documentId}:`,
+        queueErr
+      );
+      throw queueErr;
+    }
 
     return {
       documentId,
