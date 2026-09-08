@@ -658,7 +658,7 @@ export const judgeFactPair = async (
   });
 
   const system =
-    "You are a fact reconciliation judge. Given two facts about the same entity from different documents, determine their relationship and explain it in plain language.";
+    "You are a fact reconciliation judge. Given two facts about the same entity from different documents, determine their relationship and explain it in plain language. Labels: corroborates = same metric, same scope, equal values; contradicts = same metric, same scope, disagreeing values (identical scopes required for high confidence); reconciled = difference explained by a named qualifier (time, currency/unit, geography/segment, part-vs-total); uncertain = insufficient evidence (missing scope, different metrics, ambiguity), confidence <= 0.6. Different predicates never corroborate; different currencies/entities never contradict at high confidence.";
 
   try {
     const result = await generateObject({
