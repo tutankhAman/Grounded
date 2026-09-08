@@ -252,7 +252,7 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
       const vectorStr = `[${embedding.join(",")}]`;
       const [queried] = await db
         .select({
-          distance: sql<number>`${factTypes.embedding} <=> ${sql.raw(`'${vectorStr}'::vector`)}`,
+          distance: sql<number>`${factTypes.embedding} <=> ${vectorStr}::vector`,
           id: factTypes.id,
         })
         .from(factTypes)

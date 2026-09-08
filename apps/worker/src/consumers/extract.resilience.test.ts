@@ -174,6 +174,17 @@ describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
       expect(decision).toBe("extract-text-table");
     });
 
+    test("assessChunk routes low-text with vision disabled to defer-vision-disabled", () => {
+      const decision = assessChunk(
+        {
+          isLowText: true,
+          rawText: "Short text",
+        },
+        false
+      );
+      expect(decision).toBe("defer-vision-disabled");
+    });
+
     test("deduplicatePages bypasses boilerplate stripping and dedup when skipBoilerplate is false", () => {
       const samplePages = [
         {

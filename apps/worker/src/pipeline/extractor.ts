@@ -160,7 +160,12 @@ export interface ChunkForAssessment {
 export const assessChunk = (
   chunk: ChunkForAssessment,
   visionEnabled: boolean = process.env.VISION_ENABLED !== "0"
-): "extract-text" | "extract-text-table" | "extract-vision" | "skip" => {
+):
+  | "defer-vision-disabled"
+  | "extract-text"
+  | "extract-text-table"
+  | "extract-vision"
+  | "skip" => {
   const isTextEmpty = chunk.rawText.trim().length === 0;
   const hasNoRuns =
     !chunk.runs || (Array.isArray(chunk.runs) && chunk.runs.length === 0);
@@ -171,7 +176,7 @@ export const assessChunk = (
 
   const isLowText = Boolean(chunk.isLowText);
   if (isLowText) {
-    return visionEnabled ? "extract-vision" : "skip";
+    return visionEnabled ? "extract-vision" : "defer-vision-disabled";
   }
 
   if (chunk.isTableHeavy) {

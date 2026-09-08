@@ -172,7 +172,7 @@ describe("extractor pure layer unit tests", () => {
       )
     ).toBe("extract-vision");
 
-    // Scanned / low-text chunk with vision disabled -> skip
+    // Scanned / low-text chunk with vision disabled -> defer-vision-disabled
     expect(
       assessChunk(
         {
@@ -181,7 +181,7 @@ describe("extractor pure layer unit tests", () => {
         },
         false
       )
-    ).toBe("skip");
+    ).toBe("defer-vision-disabled");
   });
 
   test("7. buildEmbeddingInput produces exact expected inline task prefix format", () => {

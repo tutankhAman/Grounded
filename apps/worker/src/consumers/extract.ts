@@ -61,7 +61,7 @@ function normalizeExtractedFact(
   defaultPageNumber: number
 ): BatchExtractedFact {
   return {
-    confidence: typeof raw.confidence === "number" ? raw.confidence : 1,
+    confidence: typeof raw.confidence === "number" ? raw.confidence : 0,
     currency: typeof raw.currency === "string" ? raw.currency : undefined,
     entity: (raw.entity as
       | { context: string; name: string; type: string }
@@ -122,16 +122,14 @@ export const canonicalizeFactType = async (
   // Query nearest fact_type by cosine distance
   const candidates = await db
     .select({
-      distance: sql<number>`${factTypes.embedding} <=> ${sql.raw(`'${vectorStr}'::vector`)}`,
+      distance: sql<number>`${factTypes.embedding} <=> ${vectorStr}::vector`,
       examplePredicates: factTypes.examplePredicates,
       id: factTypes.id,
       name: factTypes.name,
     })
     .from(factTypes)
     .where(sql`${factTypes.embedding} IS NOT NULL`)
-    .orderBy(
-      sql`${factTypes.embedding} <=> ${sql.raw(`'${vectorStr}'::vector`)}`
-    )
+    .orderBy(sql`${factTypes.embedding} <=> ${vectorStr}::vector`)
     .limit(1);
 
   const [best] = candidates;
@@ -258,15 +256,20 @@ export function deduplicatePages(
 }
 
 interface CategorizedPages {
+  deferredChunkIds: string[];
   skippedChunkIds: string[];
   textPages: CompactedPageData[];
   visionPages: CompactedPageData[];
 }
 
-function categorizePages(uniquePages: CompactedPageData[]): CategorizedPages {
+function categorizePages(
+  uniquePages: CompactedPageData[],
+  visionEnabled = process.env.VISION_ENABLED !== "0"
+): CategorizedPages {
   const textPages: CompactedPageData[] = [];
   const visionPages: CompactedPageData[] = [];
   const skippedChunkIds: string[] = [];
+  const deferredChunkIds: string[] = [];
 
   for (const page of uniquePages) {
     const decision = assessChunk(
@@ -275,11 +278,13 @@ function categorizePages(uniquePages: CompactedPageData[]): CategorizedPages {
         isTableHeavy: page.isTableHeavy,
         rawText: page.compactedText,
       },
-      true
+      visionEnabled
     );
 
     if (decision === "skip") {
       skippedChunkIds.push(...page.chunkIds);
+    } else if (decision === "defer-vision-disabled") {
+      deferredChunkIds.push(...page.chunkIds);
     } else if (decision === "extract-vision") {
       visionPages.push(page);
     } else {
@@ -287,7 +292,7 @@ function categorizePages(uniquePages: CompactedPageData[]): CategorizedPages {
     }
   }
 
-  return { skippedChunkIds, textPages, visionPages };
+  return { deferredChunkIds, skippedChunkIds, textPages, visionPages };
 }
 
 async function escalateTablePageIfNeeded(
@@ -786,13 +791,13 @@ export const processExtractJob = async (
     pages,
     options?.skipBoilerplate
   );
-  const { skippedChunkIds, textPages, visionPages } =
+  const { deferredChunkIds, skippedChunkIds, textPages, visionPages } =
     categorizePages(uniquePages);
 
   let doneChunks = 0;
   let chunksFailed = 0;
   const updateProgress = (doneDelta: number, failedDelta = 0) => {
-    doneChunks += doneDelta;
+    doneChunks = Math.min(totalChunks, doneChunks + doneDelta);
     chunksFailed += failedDelta;
     publishProgress(documentId, doneChunks, totalChunks, "extracting");
   };
@@ -803,6 +808,14 @@ export const processExtractJob = async (
       .update(pageChunks)
       .set({ extractionStatus: "extracted" })
       .where(inArray(pageChunks.id, skippedChunkIds));
+  }
+
+  if (deferredChunkIds.length > 0) {
+    updateProgress(deferredChunkIds.length, 0);
+    await db
+      .update(pageChunks)
+      .set({ extractionStatus: "extraction_deferred" })
+      .where(inArray(pageChunks.id, deferredChunkIds));
   }
 
   const [
