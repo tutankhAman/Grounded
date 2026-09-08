@@ -35,6 +35,7 @@ import {
   extractBatch,
   extractVisionPage,
   type PageBatchItem,
+  type TokenUsage,
 } from "../pipeline/llm";
 import { imagePathToDataUrl, renderBatchImages } from "../pipeline/renderer";
 
@@ -299,86 +300,172 @@ function categorizePages(
   return { deferredChunkIds, skippedChunkIds, textPages, visionPages };
 }
 
-async function escalateTablePageIfNeeded(
+/**
+ * Pure escalation decision: which batch items are table-heavy with zero or
+ * only weak (<0.7 confidence) facts. No IO — unit-testable.
+ */
+export function collectEscalationPages(
+  batch: PageBatchItem[],
+  pageMap: Map<number, PageData>,
+  validFacts: BatchExtractedFact[]
+): PageBatchItem[] {
+  const escalations: PageBatchItem[] = [];
+  for (const batchItem of batch) {
+    const pageInfo = pageMap.get(batchItem.pageNumber);
+    if (!pageInfo?.isTableHeavy) {
+      continue;
+    }
+    const pageFacts = validFacts.filter(
+      (f) => f.pageNumber === batchItem.pageNumber
+    );
+    const needsEscalation =
+      pageFacts.length === 0 || pageFacts.every((f) => f.confidence < 0.7);
+    if (needsEscalation) {
+      escalations.push(batchItem);
+    }
+  }
+  return escalations;
+}
+
+async function runEscalationVisionGroups(
+  dataUrls: string[],
+  validPageNums: number[],
+  hint: string,
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
+): Promise<{
+  droppedMissingPage: number;
+  facts: BatchExtractedFact[];
+  visionPages: Set<number>;
+}> {
+  const visionPages = new Set<number>();
+  const resultFacts: BatchExtractedFact[] = [];
+  let droppedMissingPage = 0;
+  const allowedEscalatedPages = new Set(validPageNums);
+  for (let i = 0; i < dataUrls.length; i += VISION_BATCH_SIZE) {
+    const urlGroup = dataUrls.slice(i, i + VISION_BATCH_SIZE);
+    const numGroup = validPageNums.slice(i, i + VISION_BATCH_SIZE);
+    const visionFacts = options?.visionExtractor
+      ? await options.visionExtractor(urlGroup, numGroup, hint)
+      : await extractVisionPage(
+          urlGroup,
+          numGroup,
+          hint,
+          onUsage ? { onUsage } : undefined
+        );
+    for (const vf of visionFacts) {
+      const normalized = normalizeExtractedFact(
+        vf,
+        // Single-page escalation keeps the old attribution behavior;
+        // multi-page escalation drops pageNumber-less facts rather than
+        // misattributing them (grounding invariant).
+        numGroup.length === 1 ? (numGroup[0] ?? -1) : -1,
+        true
+      );
+      if (allowedEscalatedPages.has(normalized.pageNumber)) {
+        resultFacts.push(normalized);
+      } else {
+        droppedMissingPage++;
+      }
+    }
+    for (const pNum of numGroup) {
+      visionPages.add(pNum);
+    }
+  }
+  return { droppedMissingPage, facts: resultFacts, visionPages };
+}
+
+async function escalatePages(
   documentId: string,
   docFilePath: string | null,
-  batchItem: PageBatchItem,
-  pageInfo: PageData | undefined,
-  currentFacts: BatchExtractedFact[],
-  options?: ProcessExtractOptions
-): Promise<{ facts: BatchExtractedFact[]; visionEscalated: boolean }> {
-  if (!(pageInfo?.isTableHeavy && docFilePath)) {
-    return { facts: currentFacts, visionEscalated: false };
-  }
-
-  const pageFacts = currentFacts.filter(
-    (f) => f.pageNumber === batchItem.pageNumber
-  );
-  const needsEscalation =
-    pageFacts.length === 0 || pageFacts.every((f) => f.confidence < 0.7);
-  if (!needsEscalation) {
-    return { facts: currentFacts, visionEscalated: false };
+  escalations: PageBatchItem[],
+  pageMap: Map<number, PageData>,
+  validFacts: BatchExtractedFact[],
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
+): Promise<{ facts: BatchExtractedFact[]; visionPages: Set<number> }> {
+  const visionPages = new Set<number>();
+  if (escalations.length === 0 || !docFilePath) {
+    return { facts: validFacts, visionPages };
   }
 
   try {
-    const imageMap = await renderBatchImages(documentId, docFilePath, [
-      batchItem.pageNumber,
-    ]);
-    const imgPath = imageMap.get(batchItem.pageNumber);
-    if (!imgPath) {
-      return { facts: currentFacts, visionEscalated: false };
+    // Single shared render for all escalated pages: one PDF open, not one
+    // per page. Groups of VISION_BATCH_SIZE keep each vision call bounded.
+    const pageNums = escalations.map((e) => e.pageNumber);
+    const imageMap = await renderBatchImages(documentId, docFilePath, pageNums);
+    const dataUrls: string[] = [];
+    const validPageNums: number[] = [];
+    const imgByPage = new Map<number, string>();
+    for (const e of escalations) {
+      const imgPath = imageMap.get(e.pageNumber);
+      if (imgPath) {
+        dataUrls.push(await imagePathToDataUrl(imgPath));
+        validPageNums.push(e.pageNumber);
+        imgByPage.set(e.pageNumber, imgPath);
+      }
+    }
+    if (dataUrls.length === 0) {
+      return { facts: validFacts, visionPages };
+    }
+    for (const [pageNum, imgPath] of imgByPage) {
+      const pInfo = pageMap.get(pageNum);
+      if (pInfo) {
+        await db
+          .update(pageChunks)
+          .set({ imagePath: imgPath })
+          .where(inArray(pageChunks.id, pInfo.chunkIds));
+      }
     }
 
-    const dataUrl = await imagePathToDataUrl(imgPath);
-    const visionFacts = options?.visionExtractor
-      ? await options.visionExtractor(
-          dataUrl,
-          batchItem.pageNumber,
-          batchItem.text
-        )
-      : await extractVisionPage(
-          [dataUrl],
-          [batchItem.pageNumber],
-          batchItem.text
-        );
-
-    await db
-      .update(pageChunks)
-      .set({ imagePath: imgPath })
-      .where(inArray(pageChunks.id, pageInfo.chunkIds));
-
-    const resultFacts = [...currentFacts];
-    for (const vf of visionFacts) {
-      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber, true));
+    const hint = escalations
+      .map((e) => `--- PAGE ${e.pageNumber} ---\n${e.text}`)
+      .join("\n\n");
+    const {
+      droppedMissingPage,
+      facts: visionFacts,
+      visionPages: escalatedPages,
+    } = await runEscalationVisionGroups(
+      dataUrls,
+      validPageNums,
+      hint,
+      options,
+      onUsage
+    );
+    if (droppedMissingPage > 0) {
+      console.warn(
+        `[Extract] Dropped ${droppedMissingPage} escalated vision facts with missing/invalid pageNumber (document ${documentId})`
+      );
     }
-    return { facts: resultFacts, visionEscalated: true };
+    return {
+      facts: [...validFacts, ...visionFacts],
+      visionPages: escalatedPages,
+    };
   } catch (escErr) {
     console.warn(
-      `[Extract] Vision escalation failed for page ${batchItem.pageNumber}:`,
+      `[Extract] Vision escalation failed for pages ${escalations.map((e) => e.pageNumber).join(",")}:`,
       escErr
     );
-    return { facts: currentFacts, visionEscalated: false };
+    return { facts: validFacts, visionPages };
   }
 }
 
 async function processVisionGroup(
-  documentId: string,
-  docFilePath: string,
   group: CompactedPageData[],
   pageMap: Map<number, PageData>,
-  options?: ProcessExtractOptions
+  imageMap: Map<number, string>,
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
 ): Promise<BatchExtractedFact[]> {
-  const pageNums = group.map((p) => p.pageNumber);
-  const imageMap = await renderBatchImages(documentId, docFilePath, pageNums);
   const dataUrls: string[] = [];
   const validPageNums: number[] = [];
 
-  for (const pNum of pageNums) {
-    const imgPath = imageMap.get(pNum);
+  for (const p of group) {
+    const imgPath = imageMap.get(p.pageNumber);
     if (imgPath) {
       dataUrls.push(await imagePathToDataUrl(imgPath));
-      validPageNums.push(pNum);
-      const pInfo = pageMap.get(pNum);
+      validPageNums.push(p.pageNumber);
+      const pInfo = pageMap.get(p.pageNumber);
       if (pInfo) {
         await db
           .update(pageChunks)
@@ -394,7 +481,12 @@ async function processVisionGroup(
 
   const rawVisionResult = options?.visionExtractor
     ? await options.visionExtractor(dataUrls, validPageNums, combinedHint)
-    : await extractVisionPage(dataUrls, validPageNums, combinedHint);
+    : await extractVisionPage(
+        dataUrls,
+        validPageNums,
+        combinedHint,
+        onUsage ? { onUsage } : undefined
+      );
 
   const normalizedVisionFacts: BatchExtractedFact[] = rawVisionResult.map(
     (f, idx) =>
@@ -448,7 +540,8 @@ async function markBatchStatus(
 
 async function invokeBatchExtractor(
   batch: PageBatchItem[],
-  options?: ProcessExtractOptions
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
 ): Promise<BatchExtractedFact[]> {
   if (options?.batchExtractor) {
     return await options.batchExtractor(batch);
@@ -463,36 +556,7 @@ async function invokeBatchExtractor(
     }
     return results;
   }
-  return await extractBatch(batch);
-}
-
-async function escalateBatchTables(
-  documentId: string,
-  docFilePath: string | null,
-  batch: PageBatchItem[],
-  pageMap: Map<number, PageData>,
-  initialFacts: BatchExtractedFact[],
-  options?: ProcessExtractOptions
-): Promise<{ escalatedFacts: BatchExtractedFact[]; visionPages: Set<number> }> {
-  let accumulatedFacts = initialFacts;
-  const visionPages = new Set<number>();
-  for (const batchItem of batch) {
-    const pageInfo = pageMap.get(batchItem.pageNumber);
-    const { facts: updatedFacts, visionEscalated } =
-      await escalateTablePageIfNeeded(
-        documentId,
-        docFilePath,
-        batchItem,
-        pageInfo,
-        accumulatedFacts,
-        options
-      );
-    accumulatedFacts = updatedFacts;
-    if (visionEscalated) {
-      visionPages.add(batchItem.pageNumber);
-    }
-  }
-  return { escalatedFacts: accumulatedFacts, visionPages };
+  return await extractBatch(batch, onUsage ? { onUsage } : undefined);
 }
 
 async function processTextBatches(
@@ -501,13 +565,16 @@ async function processTextBatches(
   textPages: CompactedPageData[],
   pageMap: Map<number, PageData>,
   onProgress: (doneDelta: number, failedDelta: number) => void,
-  options?: ProcessExtractOptions
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
 ): Promise<{
+  batchCount: number;
   batchFacts: BatchExtractedFact[];
+  escalatedCount: number;
   visionFactPageNumbers: Set<number>;
 }> {
   const targetOutputTokens =
-    Number(process.env.EXTRACT_TARGET_OUTPUT_TOKENS) || 42_000;
+    Number(process.env.EXTRACT_TARGET_OUTPUT_TOKENS) || 14_000;
   const packedTextBatches = packPages(
     textPages.map((p) => ({
       pageNumber: p.pageNumber,
@@ -519,30 +586,36 @@ async function processTextBatches(
 
   const allExtractedFacts: BatchExtractedFact[] = [];
   const visionFactPageNumbers = new Set<number>();
+  let escalatedCount = 0;
 
   const executeBatch = async (
     batch: PageBatchItem[],
     depth = 0
   ): Promise<void> => {
     try {
-      const rawBatchFacts = await invokeBatchExtractor(batch, options);
+      const rawBatchFacts = await invokeBatchExtractor(batch, options, onUsage);
       const allowedPageNumbers = new Set(batch.map((p) => p.pageNumber));
       const { validFacts } = validateBatchResult(
         rawBatchFacts,
         allowedPageNumbers
       );
-      const { escalatedFacts, visionPages } = await escalateBatchTables(
+      // Escalations are collected across the whole batch and resolved with
+      // shared renders + grouped vision calls — never one render per page.
+      const escalations = collectEscalationPages(batch, pageMap, validFacts);
+      const { facts: escalatedFacts, visionPages } = await escalatePages(
         documentId,
         docFilePath,
-        batch,
+        escalations,
         pageMap,
         validFacts,
-        options
+        options,
+        onUsage
       );
 
       for (const vp of visionPages) {
         visionFactPageNumbers.add(vp);
       }
+      escalatedCount += visionPages.size;
       allExtractedFacts.push(...escalatedFacts);
 
       await markBatchStatus(batch, pageMap, "extracted", onProgress);
@@ -564,11 +637,17 @@ async function processTextBatches(
     }
   };
 
+  const batchConcurrency = Number(process.env.EXTRACT_CONCURRENCY) || 6;
   await pMap(packedTextBatches, (batch) => executeBatch(batch), {
-    concurrency: 6,
+    concurrency: batchConcurrency,
   });
 
-  return { batchFacts: allExtractedFacts, visionFactPageNumbers };
+  return {
+    batchCount: packedTextBatches.length,
+    batchFacts: allExtractedFacts,
+    escalatedCount,
+    visionFactPageNumbers,
+  };
 }
 
 async function processAllVisionPages(
@@ -577,8 +656,10 @@ async function processAllVisionPages(
   visionPages: CompactedPageData[],
   pageMap: Map<number, PageData>,
   onProgress: (doneDelta: number, failedDelta: number) => void,
-  options?: ProcessExtractOptions
+  options?: ProcessExtractOptions,
+  onUsage?: (u: TokenUsage) => void
 ): Promise<{
+  groupCount: number;
   visionFacts: BatchExtractedFact[];
   visionPageNumbers: Set<number>;
 }> {
@@ -586,43 +667,66 @@ async function processAllVisionPages(
   const visionPageNumbers = new Set<number>();
 
   if (!docFilePath || visionPages.length === 0) {
-    return { visionFacts: allVisionFacts, visionPageNumbers };
+    return { groupCount: 0, visionFacts: allVisionFacts, visionPageNumbers };
   }
 
+  // Single shared render for all vision pages: one PDF open for the whole
+  // lane instead of one per group.
+  const imageMap = await renderBatchImages(
+    documentId,
+    docFilePath,
+    visionPages.map((p) => p.pageNumber)
+  );
+
+  const groups: CompactedPageData[][] = [];
   for (let i = 0; i < visionPages.length; i += VISION_BATCH_SIZE) {
-    const group = visionPages.slice(i, i + VISION_BATCH_SIZE);
-    try {
-      const visionGroupFacts = await processVisionGroup(
-        documentId,
-        docFilePath,
-        group,
-        pageMap,
-        options
-      );
-      for (const vf of visionGroupFacts) {
-        allVisionFacts.push(vf);
-        visionPageNumbers.add(vf.pageNumber);
-      }
-      for (const p of group) {
-        onProgress(p.chunkIds.length, 0);
-        await db
-          .update(pageChunks)
-          .set({ extractionStatus: "extracted" })
-          .where(inArray(pageChunks.id, p.chunkIds));
-      }
-    } catch (vErr) {
-      console.warn("[Extract] Vision batch failed:", vErr);
-      for (const p of group) {
-        onProgress(p.chunkIds.length, p.chunkIds.length);
-        await db
-          .update(pageChunks)
-          .set({ extractionStatus: "extraction_failed" })
-          .where(inArray(pageChunks.id, p.chunkIds));
-      }
-    }
+    groups.push(visionPages.slice(i, i + VISION_BATCH_SIZE));
   }
 
-  return { visionFacts: allVisionFacts, visionPageNumbers };
+  const markGroup = async (
+    group: CompactedPageData[],
+    status: "extracted" | "extraction_failed"
+  ): Promise<void> => {
+    const failed = status === "extraction_failed";
+    for (const p of group) {
+      onProgress(p.chunkIds.length, failed ? p.chunkIds.length : 0);
+      await db
+        .update(pageChunks)
+        .set({ extractionStatus: status })
+        .where(inArray(pageChunks.id, p.chunkIds));
+    }
+  };
+
+  await pMap(
+    groups,
+    async (group) => {
+      try {
+        const visionGroupFacts = await processVisionGroup(
+          group,
+          pageMap,
+          imageMap,
+          options,
+          onUsage
+        );
+        for (const vf of visionGroupFacts) {
+          allVisionFacts.push(vf);
+          visionPageNumbers.add(vf.pageNumber);
+        }
+        await markGroup(group, "extracted");
+      } catch (vErr) {
+        console.warn("[Extract] Vision batch failed:", vErr);
+        await markGroup(group, "extraction_failed");
+      }
+    },
+    // Renders are local CPU-heavy canvas work; keep vision parallelism modest.
+    { concurrency: 2 }
+  );
+
+  return {
+    groupCount: groups.length,
+    visionFacts: allVisionFacts,
+    visionPageNumbers,
+  };
 }
 
 async function cloneDuplicateFacts(
@@ -649,16 +753,19 @@ async function cloneDuplicateFacts(
   }
 }
 
-async function persistExtractedFacts(
+async function persistFactSubset(
   documentId: string,
-  allExtractedFacts: BatchExtractedFact[],
+  subset: BatchExtractedFact[],
   pageMap: Map<number, PageData>,
   getOrCanonicalizeFactType: (
     description: string,
     predicate: string
   ) => Promise<string>
 ): Promise<number> {
-  const validatedFacts = allExtractedFacts.map((fact) => {
+  if (subset.length === 0) {
+    return 0;
+  }
+  const validatedFacts = subset.map((fact) => {
     const pageData = pageMap.get(fact.pageNumber);
     const pageRawText = pageData?.rawText ?? "";
     const isVision = Boolean(fact.viaVision);
@@ -818,33 +925,17 @@ export const processExtractJob = async (
         .where(inArray(pageChunks.id, deferredChunkIds));
     }
 
-    const [{ batchFacts }, { visionFacts }] = await Promise.all([
-      processTextBatches(
-        documentId,
-        doc.filePath,
-        textPages,
-        pageMap,
-        updateProgress,
-        options
-      ),
-      processAllVisionPages(
-        documentId,
-        doc.filePath,
-        visionPages,
-        pageMap,
-        updateProgress,
-        options
-      ),
-    ]);
+    const jobStartMs = Date.now();
 
-    const allExtractedFacts = [...batchFacts, ...visionFacts];
-
-    await cloneDuplicateFacts(
-      duplicatePageMap,
-      allExtractedFacts,
-      pageMap,
-      (doneDelta) => updateProgress(doneDelta, 0)
-    );
+    // Per-job token accounting: every gateway call in the text + vision lanes
+    // reports real input/output tokens here. This is the measurement base for
+    // packing budgets and spend — never estimates.
+    const usageTotals = { calls: 0, inputTokens: 0, outputTokens: 0 };
+    const collectUsage = (u: TokenUsage): void => {
+      usageTotals.calls += 1;
+      usageTotals.inputTokens += u.inputTokens;
+      usageTotals.outputTokens += u.outputTokens;
+    };
 
     const canonicalizeCache = new Map<string, Promise<string>>();
     const getOrCanonicalizeFactType = (
@@ -861,12 +952,66 @@ export const processExtractJob = async (
       return promise;
     };
 
-    const factsExtracted = await persistExtractedFacts(
+    // Text-lane facts persist while the vision lane still runs: the embed +
+    // canon + insert wave hides inside vision renders/vision calls instead of
+    // stacking after them. The canon cache is shared, so no duplicate mints.
+    const textLanePromise = processTextBatches(
       documentId,
+      doc.filePath,
+      textPages,
+      pageMap,
+      updateProgress,
+      options,
+      collectUsage
+    ).then(async (textResult) => {
+      const textPersisted = await persistFactSubset(
+        documentId,
+        textResult.batchFacts,
+        pageMap,
+        getOrCanonicalizeFactType
+      );
+      return { ...textResult, persistedCount: textPersisted };
+    });
+
+    const lanesStartMs = Date.now();
+    const [textLane, visionLane] = await Promise.all([
+      textLanePromise,
+      processAllVisionPages(
+        documentId,
+        doc.filePath,
+        visionPages,
+        pageMap,
+        updateProgress,
+        options,
+        collectUsage
+      ),
+    ]);
+    const lanesMs = Date.now() - lanesStartMs;
+
+    // Clone AFTER both lanes: duplicates may reference vision-lane pages.
+    const allExtractedFacts = [
+      ...textLane.batchFacts,
+      ...visionLane.visionFacts,
+    ];
+
+    await cloneDuplicateFacts(
+      duplicatePageMap,
       allExtractedFacts,
+      pageMap,
+      (doneDelta) => updateProgress(doneDelta, 0)
+    );
+
+    // Only vision-lane facts + clones remain unpersisted (text lane already is).
+    const remainingFacts = allExtractedFacts.slice(textLane.batchFacts.length);
+    const persistStartMs = Date.now();
+    const remainingPersisted = await persistFactSubset(
+      documentId,
+      remainingFacts,
       pageMap,
       getOrCanonicalizeFactType
     );
+    const persistMs = Date.now() - persistStartMs;
+    const factsExtracted = textLane.persistedCount + remainingPersisted;
 
     await db
       .update(documents)
@@ -874,6 +1019,13 @@ export const processExtractJob = async (
       .where(eq(documents.id, documentId));
 
     publishProgress(documentId, totalChunks, totalChunks, "extracted");
+
+    console.log(
+      `[Extract] documentId=${documentId} done: ${factsExtracted} facts, ` +
+        `${textLane.batchCount} text batches, ${visionLane.groupCount} vision groups, ` +
+        `${textLane.escalatedCount} escalations, tokens in=${usageTotals.inputTokens} out=${usageTotals.outputTokens} ` +
+        `(${usageTotals.calls} calls), lanes=${lanesMs}ms persist-tail=${persistMs}ms total=${Date.now() - jobStartMs}ms`
+    );
 
     try {
       await addResolveJob({ documentId });

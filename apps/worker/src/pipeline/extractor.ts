@@ -203,10 +203,12 @@ export interface PageToPack {
  * NOTE: the 1.5x factor encodes the pre-selectivity output profile. Recompute
  * from measured output/input ratios once selective-extraction baselines land;
  * a lower factor packs more pages per batch for the same output budget.
+ * The floor is proportional (not 1500): small pages must not inflate
+ * estimates and collapse packing into serial mega-batches.
  */
 export const estimatePageOutputTokens = (page: PageToPack): number => {
   const inputTokens = page.tokenEstimate ?? Math.ceil(page.text.length / 4);
-  return Math.max(1500, Math.round(inputTokens * 1.5));
+  return Math.max(400, Math.round(inputTokens * 1.5));
 };
 
 /**

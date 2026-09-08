@@ -381,7 +381,7 @@ export const processResolveJob = async (
 
         publishProgress(documentId, i + 1, clusters.length, "resolving");
       },
-      { concurrency: 1 }
+      { concurrency: Number(process.env.RESOLVE_CONCURRENCY) || 3 }
     );
 
     // Fallback check: guarantee every fact has non-null entityId

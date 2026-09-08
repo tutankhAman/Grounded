@@ -11,7 +11,7 @@ import {
   splitBatch,
   validateBatchResult,
 } from "../pipeline/extractor";
-import { deduplicatePages } from "./extract";
+import { collectEscalationPages, deduplicatePages } from "./extract";
 
 describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
   describe("TokenBucketRateLimiter", () => {
@@ -292,6 +292,75 @@ describe("Phase-2 Extraction Resilience and Pure Logic Unit Tests", () => {
       );
       expect(validatedVision.sourceQuoteValid).toBe(false);
       expect(validatedVision.fact.qualifiers.visionOnly).toBe(true);
+    });
+
+    test("collectEscalationPages selects only weak table-heavy pages", () => {
+      const pageMap = new Map([
+        [
+          1,
+          {
+            chunkIds: ["c1"],
+            firstChunkIndex: 0,
+            isLowText: false,
+            isTableHeavy: true,
+            needsVision: false,
+            pageNumber: 1,
+            rawText: "table",
+          },
+        ],
+        [
+          2,
+          {
+            chunkIds: ["c2"],
+            firstChunkIndex: 1,
+            isLowText: false,
+            isTableHeavy: true,
+            needsVision: false,
+            pageNumber: 2,
+            rawText: "table",
+          },
+        ],
+        [
+          3,
+          {
+            chunkIds: ["c3"],
+            firstChunkIndex: 2,
+            isLowText: false,
+            isTableHeavy: false,
+            needsVision: false,
+            pageNumber: 3,
+            rawText: "prose",
+          },
+        ],
+      ]);
+      const batch = [
+        { pageNumber: 1, text: "table" },
+        { pageNumber: 2, text: "table" },
+        { pageNumber: 3, text: "prose" },
+      ];
+      const strongFact: BatchExtractedFact = {
+        confidence: 0.9,
+        entity: { context: "c", name: "Acme", type: "org" },
+        factTypeDescription: "metric",
+        pageNumber: 1,
+        predicate: "revenue",
+        qualifiers: {},
+        rawValue: "100",
+        sourceQuote: "revenue 100",
+        value: "100",
+        viaVision: false,
+      };
+      // Page 1: strong table fact -> no escalation. Page 2: table-heavy with
+      // no facts -> escalate. Page 3: not table-heavy -> never escalate.
+      const escalations = collectEscalationPages(batch, pageMap, [strongFact]);
+      expect(escalations.map((e) => e.pageNumber)).toEqual([2]);
+
+      // All-weak table facts also escalate.
+      const weakFact: BatchExtractedFact = { ...strongFact, confidence: 0.5 };
+      const escalationsWeak = collectEscalationPages(batch, pageMap, [
+        { ...weakFact, pageNumber: 2 },
+      ]);
+      expect(escalationsWeak.map((e) => e.pageNumber)).toEqual([1, 2]);
     });
   });
 });
