@@ -77,26 +77,36 @@ Checklist before recording:
 
 ---
 
-## 2. Upload — Delhivery Q4 Earnings Presentation (0:15–0:50)
+## 2. Upload — Delhivery Q4 Earnings Presentation (0:15–0:55)
 
 *Click "+ Upload PDF" in the sidebar. Select `03-delhivery-q4-fy24-earnings-presentation.pdf` (27 pages).*
 
-> "Uploading the Q4 FY24 earnings deck — 27 pages of financial slides. The moment it hits the API, it gets streamed to disk and a job queue fires off four async stages."
+> "Uploading the Q4 FY24 earnings deck — 27 pages of financial slides. Let me walk through exactly what happens from the moment it hits the API."
 
-*Navigate to Documents page. Show the live status bar ticking, with the time estimate.*
+*Navigate to Documents page. Status shows `Parsing`. Point at the progress bar.*
 
-> "Watch this — real-time WebSocket, with a live time estimate. It's not polling. The worker publishes stage progress over Redis pub/sub, the API bridges it to the browser, and this bar updates live — no refresh needed."
+> "Stage one: Parse. The brief said 'extract facts from PDFs' — most implementations just dump the whole document into a prompt. We don't. The parser streams page-by-page using unpdf, a serverless pdf.js build. One page in memory at a time — O(1) memory regardless of doc size. It pulls not just the text but the actual bounding boxes: x, y, width, height per text run. Those bounding boxes are stored in the DB and are what make the highlights work later. Same coordinate system as the browser-side viewer, so no translation layer needed."
 
-*Stages animate: Parsing → Extracting → Resolving → Reconciling.*
+*Status flips to `Extracting`.*
 
-> "Four stages: parse the PDF page by page, run the LLM extractor over batched chunks, cluster and resolve entity names, then reconcile against anything already in the system."
+> "Stage two: Extract. The problem statement said 'extract meaningful facts linked to source evidence'. Here's how we actually do it — we batch pages to a fixed *output-token budget*, roughly 10 to 18 pages per LLM call with page markers embedded. Not 50 pages, not the whole doc. Why? Because Flash-Lite has a 64K output cap — naive fixed-size batches silently truncate on dense pages. We also set the model's thinking budget to zero — thinking bills as output tokens at zero extraction benefit. And the model is constrained to a Zod schema via Vercel AI SDK's generateObject — structured output, not hand-parsed JSON."
+
+> "Every fact the model returns gets its source quote validated against the actual page text before it's stored. If it hallucinated evidence, the quote won't be in the text. That fact gets a `quoteMismatch` flag and its confidence halved — it goes in, but it's flagged, not silently dropped. That's the grounding guarantee."
+
+*Status flips to `Resolving`.*
+
+> "Stage three: Entity resolution. The brief explicitly mentioned addresses and directors appearing differently across documents as a hard problem. Within the document: surface forms cluster by string similarity — Jaro-Winkler plus Levenshtein. Across documents: pgvector cosine search on 1536-dimension embeddings against all existing entities, with an LLM confirmation step for borderline matches. 'Delhivery', 'Delhivery Limited', 'Delhivery Ltd' across three documents — one canonical entity row, all three as aliases, each linked back to the document that introduced that surface form."
+
+*Status flips to `Reconciling`. Wait for `done`.*
+
+> "Stage four: Reconciliation. Two-tier, cheap-first — rule engine goes first, LLM judge only sees what the rules can't resolve. The rules handle unit conversion, multiplier math, exact value match, and timeScope comparison. Most corroborations get classified here at zero LLM cost. Anything ambiguous escalates to the judge, which gets both facts, both verbatim quotes, and the qualifiers, and returns a classification plus a plain-language explanation. That explanation is stored in the relationships table — it's the actual deliverable, not just the label."
 
 **[JUMP CUT — say it on camera:]**
-> "That run takes about two minutes end to end — measured, not estimated — so jumping ahead…"
+> "That whole run — all four stages — takes about two minutes on the 27-pager. Measured from logs, not estimated. Jumping ahead…"
 
-*Cut to the finished row: status `done`. Documents: 1, Facts: ~200–300, Entities: ~35–50. (Use the real numbers from your run.)*
+*Cut to the finished row: status `done`. Show the real fact count from your run.*
 
-> "Done. Roughly two to three hundred facts from 27 slides. Every single one grounded to a verbatim quote in the source — the pipeline validates each quote against the extracted text before storing it, and anything that fails validation gets flagged, not silently dropped."
+> "Done. [STATE REAL FACT COUNT] facts from 27 slides, all grounded, all source-validated. The problem statement asked for a system that extracts meaningful facts and links them to evidence. What we built also validates each extraction against the source, flags anything that can't be confirmed, handles large PDFs page-by-page without memory blowup, and streams every stage update to the browser in real time — no polling anywhere."
 
 ---
 
