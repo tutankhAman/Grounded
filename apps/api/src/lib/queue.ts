@@ -1,14 +1,14 @@
 import { resolve } from "node:path";
 import { PARSE_QUEUE, type ParseJob } from "@grounded/db";
 import { Queue } from "bullmq";
-import * as dotenv from "dotenv";
+import dotenv from "dotenv";
 import Redis from "ioredis";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
 
-const queueConnection = new Redis(redisUrl, {
+export const queueConnection = new Redis(redisUrl, {
   lazyConnect: true,
   maxRetriesPerRequest: null,
 });
@@ -29,4 +29,9 @@ export const parseQueue = new Queue<ParseJob>(PARSE_QUEUE, {
 export const addParseJob = async (job: ParseJob): Promise<string> => {
   const result = await parseQueue.add("parse-pdf", job);
   return result.id ?? "";
+};
+
+export const closeQueue = async (): Promise<void> => {
+  await parseQueue.close();
+  queueConnection.disconnect();
 };

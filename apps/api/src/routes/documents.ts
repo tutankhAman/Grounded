@@ -14,7 +14,8 @@ import {
 import { Elysia, t } from "elysia";
 import { addParseJob } from "../lib/queue";
 
-const UPLOAD_DIR = resolve(process.env.UPLOAD_DIR || "./uploads");
+const REPO_ROOT = resolve(import.meta.dirname, "../../../../");
+const UPLOAD_DIR = resolve(REPO_ROOT, process.env.UPLOAD_DIR || "uploads");
 const LEADING_DOTS_REGEX = /^\.+/;
 const UNSAFE_CHARS_REGEX = /[/\\?%*:|"<>]/g;
 
@@ -107,7 +108,15 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
   )
   .get("/", async () => {
     const list = await db
-      .select()
+      .select({
+        id: documents.id,
+        filename: documents.filename,
+        pageCount: documents.pageCount,
+        status: documents.status,
+        uploadedAt: documents.uploadedAt,
+        processedAt: documents.processedAt,
+        errorMessage: documents.errorMessage,
+      })
       .from(documents)
       .orderBy(desc(documents.uploadedAt))
       .limit(50);
@@ -138,8 +147,10 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
         .from(facts)
         .where(eq(facts.documentId, id));
 
+      const { filePath: _, ...safeDoc } = doc;
+
       return {
-        ...doc,
+        ...safeDoc,
         counts: {
           chunks: chunkCountRes?.count ?? 0,
           facts: factsCountRes?.count ?? 0,

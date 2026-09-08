@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { sql } from "drizzle-orm";
 import { Elysia } from "elysia";
 import Redis from "ioredis";
+import { closeQueue } from "./lib/queue";
 import { documentRoutes } from "./routes/documents";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
@@ -72,11 +73,22 @@ export const app = new Elysia()
     group.get("/", () => ({
       message: "Entities listing will be implemented in Phase 3 & 5",
     }))
-  )
-  .listen(port);
+  );
 
-console.log(
-  `🦊 Elysia API is running at http://${app.server?.hostname}:${app.server?.port}`
-);
+if (import.meta.main) {
+  app.listen(port);
+  console.log(
+    `🦊 Elysia API is running at http://${app.server?.hostname}:${app.server?.port}`
+  );
+
+  const shutdown = async () => {
+    console.log("Shutting down API server...");
+    await Promise.allSettled([redis.quit(), closeQueue()]);
+    process.exit(0);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
 
 export type App = typeof app;
