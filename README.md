@@ -88,7 +88,7 @@ flowchart TB
 | pgvector over a dedicated vector DB | Facts + vectors in one store, no sync logic; plenty at hundreds–thousands of facts |
 | Live WS progress with ETA, verified subscriptions | Worker publishes per-stage progress; a failed subscribe surfaces an error instead of silently stalling |
 
-*AI tools used: built with an AI coding agent (Muse Spark via OpenCode), with measured numbers replacing estimates throughout.*
+*AI tools used: planning by Muse Spark 1.3 in OpenCode, execution by Gemini 3.8 Flash in Antigravity — with measured numbers replacing estimates throughout.*
 
 ## Setup and Run
 
