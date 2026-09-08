@@ -1,16 +1,31 @@
 import { resolve } from "node:path";
 import { cors } from "@elysiajs/cors";
-import { db } from "@grounded/db";
+import {
+  type DocumentProgressEvent,
+  type DocumentStatus,
+  db,
+  documents,
+  eq,
+} from "@grounded/db";
 import dotenv from "dotenv";
 import { sql } from "drizzle-orm";
-import { Elysia } from "elysia";
+import { Elysia, t } from "elysia";
 import Redis from "ioredis";
+import { isTerminalStatus } from "./lib/events";
+import {
+  closePubSub,
+  subscribeToDocument,
+  unsubscribeFromDocument,
+} from "./lib/pubsub";
 import { closeQueue } from "./lib/queue";
 import { documentRoutes } from "./routes/documents";
 import { entityRoutes } from "./routes/entities";
 import { factRoutes } from "./routes/facts";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const port = Number(process.env.PORT) || 3000;
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
@@ -67,7 +82,60 @@ export const app = new Elysia()
   }))
   .use(documentRoutes)
   .use(factRoutes)
-  .use(entityRoutes);
+  .use(entityRoutes)
+  .ws("/documents/:id/status", {
+    async close(ws) {
+      const documentId = ws.data.params?.id;
+      if (documentId && UUID_REGEX.test(documentId)) {
+        await unsubscribeFromDocument(documentId, ws);
+      }
+    },
+    async open(ws) {
+      const documentId = ws.data.params.id;
+      if (!UUID_REGEX.test(documentId)) {
+        ws.send(JSON.stringify({ error: "Invalid document ID format" }));
+        ws.close(4400, "Invalid document UUID");
+        return;
+      }
+
+      const [doc] = await db
+        .select({
+          errorMessage: documents.errorMessage,
+          pageCount: documents.pageCount,
+          status: documents.status,
+        })
+        .from(documents)
+        .where(eq(documents.id, documentId))
+        .limit(1);
+
+      if (!doc) {
+        ws.send(JSON.stringify({ error: `Document ${documentId} not found` }));
+        ws.close(4404, "Document not found");
+        return;
+      }
+
+      const isDone = doc.status === "done";
+      const initialEvent: DocumentProgressEvent = {
+        errorMessage: doc.errorMessage,
+        progress: {
+          current: isDone ? (doc.pageCount ?? 1) : 0,
+          total: doc.pageCount ?? 1,
+        },
+        status: doc.status as DocumentStatus,
+      };
+      ws.send(JSON.stringify(initialEvent));
+
+      if (isTerminalStatus(doc.status)) {
+        ws.close(1000, "Document in terminal state");
+        return;
+      }
+
+      await subscribeToDocument(documentId, ws);
+    },
+    params: t.Object({
+      id: t.String(),
+    }),
+  });
 
 if (import.meta.main) {
   const maxUploadMb = Number(process.env.MAX_UPLOAD_MB) || 100;
@@ -83,7 +151,7 @@ if (import.meta.main) {
 
   const shutdown = async () => {
     console.log("Shutting down API server...");
-    await Promise.allSettled([redis.quit(), closeQueue()]);
+    await Promise.allSettled([redis.quit(), closeQueue(), closePubSub()]);
     process.exit(0);
   };
 
