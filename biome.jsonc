@@ -41,8 +41,10 @@
       "includes": [
         "apps/worker/src/pipeline/parser.ts",
         "apps/worker/src/consumers/parse.ts",
+        "apps/worker/src/consumers/extract.ts",
         "apps/worker/src/pipeline/llm.ts",
-        "apps/worker/src/pipeline/renderer.ts"
+        "apps/worker/src/pipeline/renderer.ts",
+        "apps/worker/src/lib/rate-limit.ts"
       ],
       "linter": {
         "rules": {

@@ -10,6 +10,7 @@ import {
   type ExtractedFact,
 } from "@grounded/db";
 import { embedMany, generateObject, generateText } from "ai";
+import { rateLimitedFetch } from "../lib/rate-limit";
 import {
   EXTRACTION_SYSTEM_PROMPT,
   parseFallbackBatchOutput,
@@ -46,6 +47,7 @@ export const getChatProvider = () => {
   return createOpenAI({
     apiKey,
     baseURL,
+    fetch: rateLimitedFetch,
   });
 };
 
@@ -57,7 +59,10 @@ export const getDirectGoogleProvider = () => {
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is required for direct Google embedding.");
   }
-  return createGoogleGenerativeAI({ apiKey });
+  return createGoogleGenerativeAI({
+    apiKey,
+    fetch: rateLimitedFetch,
+  });
 };
 
 export interface PageBatchItem {
