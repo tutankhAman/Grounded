@@ -12,7 +12,8 @@ mock.module("ai", () => ({
 // Import after the mock so llm.ts binds the stubbed SDK. No network is
 // touched: generateObject is stubbed and the provider client only builds
 // request config. Tests set a dummy LLM_API_KEY for provider construction.
-const { extractBatch, normalizeUsage } = await import("./llm");
+const { envOr, extractBatch, normalizeUsage, resolveJudgeModelName } =
+  await import("./llm");
 
 import type { TokenUsage } from "./llm";
 
@@ -68,5 +69,68 @@ describe("llm usage reporting (mocked SDK, no network)", () => {
     expect(
       normalizeUsage({ inputTokens: 7, outputTokens: 8, totalTokens: 15 })
     ).toEqual({ inputTokens: 7, outputTokens: 8, totalTokens: 15 });
+  });
+});
+
+describe("model selection (empty-string-safe env fallback)", () => {
+  const KEYS = ["JUDGE_MODEL", "TEXT_MODEL"] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  const setEnv = (values: Partial<Record<string, string | undefined>>) => {
+    for (const k of KEYS) {
+      if (!(k in saved)) {
+        saved[k] = process.env[k];
+      }
+      const v = values[k];
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
+    }
+  };
+
+  const restoreEnv = () => {
+    for (const k of KEYS) {
+      const v = saved[k];
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
+    }
+  };
+
+  test("envOr treats empty and whitespace-only strings as missing", () => {
+    expect(envOr("model-x", "fallback")).toBe("model-x");
+    expect(envOr("", "fallback")).toBe("fallback");
+    expect(envOr("   ", "fallback")).toBe("fallback");
+    expect(envOr(undefined, "fallback")).toBe("fallback");
+    restoreEnv();
+  });
+
+  test("JUDGE_MODEL='' falls back to TEXT_MODEL (regression: empty model id)", () => {
+    setEnv({ JUDGE_MODEL: "", TEXT_MODEL: "gemini-3.5-flash-lite" });
+    try {
+      expect(resolveJudgeModelName()).toBe("gemini-3.5-flash-lite");
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  test("explicit JUDGE_MODEL wins; unset chain reaches the default", () => {
+    setEnv({ JUDGE_MODEL: "judge-v1", TEXT_MODEL: "text-v1" });
+    try {
+      expect(resolveJudgeModelName()).toBe("judge-v1");
+      expect(resolveJudgeModelName("override-v9")).toBe("override-v9");
+    } finally {
+      restoreEnv();
+    }
+    setEnv({ JUDGE_MODEL: undefined, TEXT_MODEL: undefined });
+    try {
+      expect(resolveJudgeModelName()).toBe("gemini-3.5-flash-lite");
+    } finally {
+      restoreEnv();
+    }
   });
 });

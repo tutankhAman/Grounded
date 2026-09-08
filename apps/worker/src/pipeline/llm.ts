@@ -38,6 +38,28 @@ export class ExtractionFailedError extends Error {
 }
 
 /**
+ * Empty-string-safe env lookup. `??` does NOT catch `""`, and several env
+ * vars (notably JUDGE_MODEL) are present-but-empty in .env — passing "" as a
+ * model id makes the provider throw "you must provide a model parameter".
+ * Always prefer this over `??` for model-name selection.
+ */
+export const envOr = (value: string | undefined, fallback: string): string =>
+  value !== undefined && value.trim() !== "" ? value : fallback;
+
+/**
+ * Pure model-selection chain for the reconcile judge. Extracted so the
+ * empty-JUDGE_MODEL fallback is unit-testable without network access.
+ */
+export const resolveJudgeModelName = (override?: string): string =>
+  envOr(
+    override,
+    envOr(
+      process.env.JUDGE_MODEL,
+      envOr(process.env.TEXT_MODEL, "gemini-3.5-flash-lite")
+    )
+  );
+
+/**
  * Single gateway-routed OpenAI-compatible chat provider.
  * Uses LLM_BASE_URL (defaults to Gemini OpenAI-compatible endpoint) and LLM_API_KEY.
  * Falls back to GEMINI_API_KEY if LLM_API_KEY is not explicitly set.
@@ -151,7 +173,7 @@ export const extractBatch = async (
   }
 
   const provider = getChatProvider();
-  const modelName = process.env.TEXT_MODEL ?? "gemini-3.5-flash-lite";
+  const modelName = envOr(process.env.TEXT_MODEL, "gemini-3.5-flash-lite");
   const model = provider(modelName);
   const systemPrompt = options?.systemPrompt ?? EXTRACTION_SYSTEM_PROMPT;
   const thinkingBudget = Number(process.env.THINKING_BUDGET ?? 0);
@@ -333,7 +355,10 @@ export async function extractVisionPage(
   }
 
   const provider = getChatProvider();
-  const visionModelName = process.env.VISION_MODEL ?? "gemini-3.5-flash-lite";
+  const visionModelName = envOr(
+    process.env.VISION_MODEL,
+    "gemini-3.5-flash-lite"
+  );
   const model = provider(visionModelName);
   const thinkingBudget = Number(process.env.THINKING_BUDGET ?? 0);
 
@@ -443,10 +468,12 @@ const fetchAndCacheMissing = async (
   missingValues: string[],
   customTaskType?: string
 ): Promise<number[][]> => {
-  const modelName = process.env.EMBEDDING_MODEL ?? "gemini-embedding-001";
+  const modelName = envOr(process.env.EMBEDDING_MODEL, "gemini-embedding-001");
   const dim = Number(process.env.EMBEDDING_DIM ?? EMBEDDING_DIM);
-  const taskType =
-    customTaskType ?? process.env.EMBEDDING_TASK_DOC ?? "RETRIEVAL_DOCUMENT";
+  const taskType = envOr(
+    customTaskType,
+    envOr(process.env.EMBEDDING_TASK_DOC, "RETRIEVAL_DOCUMENT")
+  );
   const BATCH_SIZE = 100;
   const fetched: number[][] = [];
 
@@ -565,7 +592,7 @@ export const confirmEntityMatch = async (params: {
   nameB: string;
 }): Promise<EntityConfirm> => {
   const provider = getChatProvider();
-  const modelName = process.env.TEXT_MODEL ?? "gemini-3.5-flash-lite";
+  const modelName = envOr(process.env.TEXT_MODEL, "gemini-3.5-flash-lite");
   const model = provider(modelName);
   const prompt = buildEntityConfirmPrompt(params);
 
@@ -618,11 +645,7 @@ export const judgeFactPair = async (
   options?: JudgeFactPairOptions
 ): Promise<ReconciliationResult> => {
   const provider = getChatProvider();
-  const modelName =
-    options?.model ??
-    process.env.JUDGE_MODEL ??
-    process.env.TEXT_MODEL ??
-    "gemini-3.5-flash-lite";
+  const modelName = resolveJudgeModelName(options?.model);
   const model = provider(modelName);
   const thinkingBudget =
     options?.thinkingBudget ?? Number(process.env.JUDGE_THINKING_BUDGET ?? "0");
