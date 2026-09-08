@@ -326,13 +326,11 @@ async function escalateTablePageIfNeeded(
       .set({ imagePath: imgPath })
       .where(inArray(pageChunks.id, pageInfo.chunkIds));
 
-    const otherFacts = currentFacts.filter(
-      (f) => f.pageNumber !== batchItem.pageNumber
-    );
+    const resultFacts = [...currentFacts];
     for (const vf of visionFacts) {
-      otherFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber));
+      resultFacts.push(normalizeExtractedFact(vf, batchItem.pageNumber));
     }
-    return { facts: otherFacts, visionEscalated: true };
+    return { facts: resultFacts, visionEscalated: true };
   } catch (escErr) {
     console.warn(
       `[Extract] Vision escalation failed for page ${batchItem.pageNumber}:`,
@@ -501,7 +499,10 @@ async function processTextBatches(
   const allExtractedFacts: BatchExtractedFact[] = [];
   const visionFactPageNumbers = new Set<number>();
 
-  const executeBatch = async (batch: PageBatchItem[]): Promise<void> => {
+  const executeBatch = async (
+    batch: PageBatchItem[],
+    depth = 0
+  ): Promise<void> => {
     try {
       const rawBatchFacts = await invokeBatchExtractor(batch, options);
       const allowedPageNumbers = new Set(batch.map((p) => p.pageNumber));
@@ -525,17 +526,17 @@ async function processTextBatches(
 
       await markBatchStatus(batch, pageMap, "extracted", onProgress);
     } catch (batchErr) {
-      if (batch.length > 1) {
+      if (depth < 1 && batch.length > 1) {
         const [b1, b2] = splitBatch(batch);
         await Promise.all([
-          executeBatch(b1),
-          b2.length > 0 ? executeBatch(b2) : Promise.resolve(),
+          executeBatch(b1, depth + 1),
+          b2.length > 0 ? executeBatch(b2, depth + 1) : Promise.resolve(),
         ]);
         return;
       }
 
       console.warn(
-        `[Extract] Page ${batch[0]?.pageNumber} failed extraction:`,
+        `[Extract] Batch failed extraction (pages ${batch.map((p) => p.pageNumber).join(",")}):`,
         batchErr
       );
       await markBatchStatus(batch, pageMap, "extraction_failed", onProgress);
