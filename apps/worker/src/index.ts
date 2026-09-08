@@ -48,13 +48,23 @@ const shutdown = async (signal: string) => {
   console.log(
     `[Worker] ${signal} received. Closing worker and Redis connections...`
   );
+  const shutdownTimer = setTimeout(() => {
+    console.error(
+      "[Worker] Shutdown deadline exceeded (10s). Forcing termination."
+    );
+    process.exit(1);
+  }, 10_000);
+  shutdownTimer.unref();
+
   try {
     await documentWorker.close();
     await pubRedis.quit();
     await connection.quit();
+    clearTimeout(shutdownTimer);
     console.log("[Worker] Graceful shutdown completed.");
     process.exit(0);
   } catch (err) {
+    clearTimeout(shutdownTimer);
     console.error("[Worker] Error during shutdown:", err);
     process.exit(1);
   }
