@@ -150,6 +150,12 @@ any existing `fact_types` row, it proposes a new one. A canonicalization step ch
 against existing types before minting a new one, so "revenue," "total revenue," and "net revenue" don't
 silently fork into three types unless the document actually distinguishes them.
 
+**Embedding Standard**: Embeddings use Google's `gemini-embedding-2` model configured with Matryoshka
+Representation Learning (MRL) output dimensionality `dim = 1536` (`outputDimensionality: 1536`).
+This preserves >98% retrieval accuracy while remaining within pgvector's 2,000-dimension limit for standard
+float4 HNSW vector index operations (`embedding vector_cosine_ops`), avoiding halfvec overhead. Task types
+are passed explicitly (`SEMANTIC_SIMILARITY` for facts/predicates, `CLUSTERING` for entity resolution).
+
 ## 4. Pipeline Stages
 
 ### 4.1 Ingestion and parsing
