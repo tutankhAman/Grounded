@@ -789,25 +789,27 @@ export const processExtractJob = async (
       .where(inArray(pageChunks.id, skippedChunkIds));
   }
 
-  const { batchFacts, visionFactPageNumbers: textVisionPages } =
-    await processTextBatches(
+  const [
+    { batchFacts, visionFactPageNumbers: textVisionPages },
+    { visionFacts, visionPageNumbers: directVisionPages },
+  ] = await Promise.all([
+    processTextBatches(
       documentId,
       doc.filePath,
       textPages,
       pageMap,
       updateProgress,
       options
-    );
-
-  const { visionFacts, visionPageNumbers: directVisionPages } =
-    await processAllVisionPages(
+    ),
+    processAllVisionPages(
       documentId,
       doc.filePath,
       visionPages,
       pageMap,
       updateProgress,
       options
-    );
+    ),
+  ]);
 
   const allExtractedFacts = [...batchFacts, ...visionFacts];
   const visionFactPageNumbers = new Set([
