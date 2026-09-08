@@ -1,6 +1,8 @@
 export const PARSE_QUEUE = "document-processing" as const;
 export const RESOLVE_QUEUE_NAME = PARSE_QUEUE;
 export const RESOLVE_JOB_NAME = "resolve-document" as const;
+export const RECONCILE_QUEUE_NAME = PARSE_QUEUE;
+export const RECONCILE_JOB_NAME = "reconcile-document" as const;
 
 export interface ParseJob {
   documentId: string;
@@ -12,6 +14,10 @@ export interface ExtractJob {
 }
 
 export interface ResolveJob {
+  documentId: string;
+}
+
+export interface ReconcileJob {
   documentId: string;
 }
 
@@ -102,5 +108,56 @@ export const getResolverThresholds = (
     parseEnvNumber(
       process.env.STRING_SIMILARITY_THRESHOLD,
       DEFAULT_RESOLVER_THRESHOLDS.stringSimilarityThreshold
+    ),
+});
+
+export interface ReconcileThresholds {
+  judgeModel: string;
+  judgeThinkingBudget: number;
+  matchCandidates: number;
+  matchDistance: number;
+  reconcileConcurrency: number;
+}
+
+export const DEFAULT_RECONCILE_THRESHOLDS: Readonly<ReconcileThresholds> =
+  Object.freeze({
+    judgeModel: "gemini-3.5-flash-lite",
+    judgeThinkingBudget: 0,
+    matchCandidates: 10,
+    matchDistance: 0.35,
+    reconcileConcurrency: 4,
+  });
+
+export const getReconcileThresholds = (
+  overrides?: Partial<ReconcileThresholds>
+): ReconcileThresholds => ({
+  judgeModel:
+    overrides?.judgeModel ??
+    process.env.JUDGE_MODEL ??
+    process.env.TEXT_MODEL ??
+    DEFAULT_RECONCILE_THRESHOLDS.judgeModel,
+  judgeThinkingBudget:
+    overrides?.judgeThinkingBudget ??
+    parseEnvNumber(
+      process.env.JUDGE_THINKING_BUDGET,
+      DEFAULT_RECONCILE_THRESHOLDS.judgeThinkingBudget
+    ),
+  matchCandidates:
+    overrides?.matchCandidates ??
+    parseEnvNumber(
+      process.env.MATCH_CANDIDATES,
+      DEFAULT_RECONCILE_THRESHOLDS.matchCandidates
+    ),
+  matchDistance:
+    overrides?.matchDistance ??
+    parseEnvNumber(
+      process.env.MATCH_DISTANCE,
+      DEFAULT_RECONCILE_THRESHOLDS.matchDistance
+    ),
+  reconcileConcurrency:
+    overrides?.reconcileConcurrency ??
+    parseEnvNumber(
+      process.env.RECONCILE_CONCURRENCY,
+      DEFAULT_RECONCILE_THRESHOLDS.reconcileConcurrency
     ),
 });
