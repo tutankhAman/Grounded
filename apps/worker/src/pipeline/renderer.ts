@@ -15,44 +15,53 @@ export interface RenderResult {
   imagePath: string;
 }
 
-export const renderPageImage = async (
+/**
+ * Renders multiple PDF pages into images sharing a single PDF document proxy.
+ * Uses RENDER_SCALE (defaults to 1.5) to keep charts legible without excessive memory.
+ */
+export const renderBatchImages = async (
   documentId: string,
-  pageNumber: number,
-  filePath: string
-): Promise<string> => {
-  // Dynamic import of unpdf after canvas module is registered
+  filePath: string,
+  pages: number[]
+): Promise<Map<number, string>> => {
   const { getDocumentProxy } = await import("unpdf");
   const buf = await globalThis.Bun.file(filePath).arrayBuffer();
   const pdf = await getDocumentProxy(new Uint8Array(buf));
 
+  const scale = Number(process.env.RENDER_SCALE) || 1.5;
   const targetDir = resolve(UPLOAD_DIR, "images", documentId);
   await mkdir(targetDir, { recursive: true });
-  const targetPath = resolve(targetDir, `p${pageNumber}.png`);
 
-  let canvasInstance: ReturnType<typeof canvas.createCanvas> | null = null;
+  const renderedPages = new Map<number, string>();
 
   try {
-    const page = await pdf.getPage(pageNumber);
-    try {
-      const viewport = page.getViewport({ scale: 2 });
-      canvasInstance = canvas.createCanvas(viewport.width, viewport.height);
-      const ctx = canvasInstance.getContext("2d");
+    for (const pageNumber of pages) {
+      const page = await pdf.getPage(pageNumber);
+      const targetPath = resolve(targetDir, `p${pageNumber}.png`);
+      let canvasInstance: canvas.Canvas | null = null;
 
-      await page.render({
-        canvasContext: ctx as unknown as CanvasRenderingContext2D,
-        viewport,
-      }).promise;
+      try {
+        const viewport = page.getViewport({ scale });
+        canvasInstance = canvas.createCanvas(viewport.width, viewport.height);
+        const ctx = canvasInstance.getContext("2d");
 
-      const pngBuffer = canvasInstance.toBuffer("image/png");
-      await globalThis.Bun.write(targetPath, pngBuffer);
-    } finally {
-      page.cleanup();
+        await page.render({
+          canvasContext: ctx as unknown as CanvasRenderingContext2D,
+          viewport,
+        } as unknown as Parameters<typeof page.render>[0]).promise;
+
+        const pngBuffer = canvasInstance.toBuffer("image/png");
+        await globalThis.Bun.write(targetPath, pngBuffer);
+        renderedPages.set(pageNumber, targetPath);
+      } finally {
+        page.cleanup();
+        if (canvasInstance) {
+          canvasInstance.width = 0;
+          canvasInstance.height = 0;
+        }
+      }
     }
   } finally {
-    if (canvasInstance) {
-      canvasInstance.width = 0;
-      canvasInstance.height = 0;
-    }
     if (
       typeof (pdf as unknown as { cleanup?: () => void }).cleanup === "function"
     ) {
@@ -68,7 +77,25 @@ export const renderPageImage = async (
     }
   }
 
-  return targetPath;
+  return renderedPages;
+};
+
+/**
+ * Single-page image rendering wrapper preserving backwards compatibility.
+ */
+export const renderPageImage = async (
+  documentId: string,
+  pageNumber: number,
+  filePath: string
+): Promise<string> => {
+  const rendered = await renderBatchImages(documentId, filePath, [pageNumber]);
+  const imagePath = rendered.get(pageNumber);
+  if (!imagePath) {
+    throw new Error(
+      `Failed to render image for document ${documentId} page ${pageNumber}`
+    );
+  }
+  return imagePath;
 };
 
 export const imagePathToDataUrl = async (
