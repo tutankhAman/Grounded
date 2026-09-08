@@ -141,13 +141,13 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
     const [chunkBad] = await db
       .insert(pageChunks)
       .values({
-        chunkIndex: 1,
+        chunkIndex: 0,
         documentId: testDoc.id,
         extractionStatus: "pending",
         isLowText: false,
         isTableHeavy: false,
         needsVision: false,
-        pageNumber: 1,
+        pageNumber: 2,
         rawText: "Corrupted input designed to trigger extraction failure.",
         tokenEstimate: 50,
       })

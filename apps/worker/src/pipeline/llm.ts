@@ -414,7 +414,9 @@ const fetchAndCacheMissing = async (
         provider.embedding(modelName),
         {
           openai: {
+            dimensions: dim,
             extraBody: {
+              dimensions: dim,
               outputDimensionality: dim,
               taskType,
             },

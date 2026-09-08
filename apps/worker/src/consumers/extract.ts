@@ -278,40 +278,6 @@ function categorizePages(uniquePages: CompactedPageData[]): CategorizedPages {
   return { skippedChunkIds, textPages, visionPages };
 }
 
-async function runBatchWithSplitRetry(
-  batch: PageBatchItem[],
-  options?: ProcessExtractOptions
-): Promise<BatchExtractedFact[]> {
-  try {
-    if (options?.batchExtractor) {
-      return await options.batchExtractor(batch);
-    }
-    if (options?.textExtractor) {
-      const results: BatchExtractedFact[] = [];
-      for (const item of batch) {
-        const itemFacts = await options.textExtractor(item.text);
-        for (const f of itemFacts) {
-          results.push(normalizeExtractedFact(f, item.pageNumber));
-        }
-      }
-      return results;
-    }
-    return await extractBatch(batch);
-  } catch (err) {
-    if (batch.length > 1) {
-      const [b1, b2] = splitBatch(batch);
-      const [r1, r2] = await Promise.all([
-        runBatchWithSplitRetry(b1, options),
-        b2.length > 0
-          ? runBatchWithSplitRetry(b2, options)
-          : Promise.resolve([]),
-      ]);
-      return [...r1, ...r2];
-    }
-    throw err;
-  }
-}
-
 async function escalateTablePageIfNeeded(
   documentId: string,
   docFilePath: string | null,
@@ -442,6 +408,74 @@ function publishProgress(
     });
 }
 
+async function markBatchStatus(
+  batch: PageBatchItem[],
+  pageMap: Map<number, PageData>,
+  status: "extracted" | "extraction_failed",
+  onProgress: (doneDelta: number, failedDelta: number) => void
+): Promise<void> {
+  const isFailed = status === "extraction_failed";
+  for (const item of batch) {
+    const pInfo = pageMap.get(item.pageNumber);
+    if (pInfo) {
+      onProgress(pInfo.chunkIds.length, isFailed ? pInfo.chunkIds.length : 0);
+      await db
+        .update(pageChunks)
+        .set({ extractionStatus: status })
+        .where(inArray(pageChunks.id, pInfo.chunkIds));
+    }
+  }
+}
+
+async function invokeBatchExtractor(
+  batch: PageBatchItem[],
+  options?: ProcessExtractOptions
+): Promise<BatchExtractedFact[]> {
+  if (options?.batchExtractor) {
+    return await options.batchExtractor(batch);
+  }
+  if (options?.textExtractor) {
+    const results: BatchExtractedFact[] = [];
+    for (const item of batch) {
+      const itemFacts = await options.textExtractor(item.text);
+      for (const f of itemFacts) {
+        results.push(normalizeExtractedFact(f, item.pageNumber));
+      }
+    }
+    return results;
+  }
+  return await extractBatch(batch);
+}
+
+async function escalateBatchTables(
+  documentId: string,
+  docFilePath: string | null,
+  batch: PageBatchItem[],
+  pageMap: Map<number, PageData>,
+  initialFacts: BatchExtractedFact[],
+  options?: ProcessExtractOptions
+): Promise<{ escalatedFacts: BatchExtractedFact[]; visionPages: Set<number> }> {
+  let accumulatedFacts = initialFacts;
+  const visionPages = new Set<number>();
+  for (const batchItem of batch) {
+    const pageInfo = pageMap.get(batchItem.pageNumber);
+    const { facts: updatedFacts, visionEscalated } =
+      await escalateTablePageIfNeeded(
+        documentId,
+        docFilePath,
+        batchItem,
+        pageInfo,
+        accumulatedFacts,
+        options
+      );
+    accumulatedFacts = updatedFacts;
+    if (visionEscalated) {
+      visionPages.add(batchItem.pageNumber);
+    }
+  }
+  return { escalatedFacts: accumulatedFacts, visionPages };
+}
+
 async function processTextBatches(
   documentId: string,
   docFilePath: string | null,
@@ -467,65 +501,50 @@ async function processTextBatches(
   const allExtractedFacts: BatchExtractedFact[] = [];
   const visionFactPageNumbers = new Set<number>();
 
-  await pMap(
-    packedTextBatches,
-    async (batch) => {
+  const executeBatch = async (batch: PageBatchItem[]): Promise<void> => {
+    try {
+      const rawBatchFacts = await invokeBatchExtractor(batch, options);
       const allowedPageNumbers = new Set(batch.map((p) => p.pageNumber));
-      try {
-        const rawBatchFacts = await runBatchWithSplitRetry(batch, options);
-        let { validFacts: batchFacts } = validateBatchResult(
-          rawBatchFacts,
-          allowedPageNumbers
-        );
+      const { validFacts } = validateBatchResult(
+        rawBatchFacts,
+        allowedPageNumbers
+      );
+      const { escalatedFacts, visionPages } = await escalateBatchTables(
+        documentId,
+        docFilePath,
+        batch,
+        pageMap,
+        validFacts,
+        options
+      );
 
-        for (const batchItem of batch) {
-          const pageInfo = pageMap.get(batchItem.pageNumber);
-          const { facts: updatedFacts, visionEscalated } =
-            await escalateTablePageIfNeeded(
-              documentId,
-              docFilePath,
-              batchItem,
-              pageInfo,
-              batchFacts,
-              options
-            );
-          batchFacts = updatedFacts;
-          if (visionEscalated) {
-            visionFactPageNumbers.add(batchItem.pageNumber);
-          }
-        }
-
-        allExtractedFacts.push(...batchFacts);
-
-        for (const item of batch) {
-          const pInfo = pageMap.get(item.pageNumber);
-          if (pInfo) {
-            onProgress(pInfo.chunkIds.length, 0);
-            await db
-              .update(pageChunks)
-              .set({ extractionStatus: "extracted" })
-              .where(inArray(pageChunks.id, pInfo.chunkIds));
-          }
-        }
-      } catch (batchErr) {
-        console.warn(
-          `[Extract] Batch failed for pages ${batch.map((p) => p.pageNumber).join(",")}:`,
-          batchErr
-        );
-        for (const item of batch) {
-          const pInfo = pageMap.get(item.pageNumber);
-          if (pInfo) {
-            onProgress(pInfo.chunkIds.length, pInfo.chunkIds.length);
-            await db
-              .update(pageChunks)
-              .set({ extractionStatus: "extraction_failed" })
-              .where(inArray(pageChunks.id, pInfo.chunkIds));
-          }
-        }
+      for (const vp of visionPages) {
+        visionFactPageNumbers.add(vp);
       }
-    },
-    { concurrency: 6 }
-  );
+      allExtractedFacts.push(...escalatedFacts);
+
+      await markBatchStatus(batch, pageMap, "extracted", onProgress);
+    } catch (batchErr) {
+      if (batch.length > 1) {
+        const [b1, b2] = splitBatch(batch);
+        await Promise.all([
+          executeBatch(b1),
+          b2.length > 0 ? executeBatch(b2) : Promise.resolve(),
+        ]);
+        return;
+      }
+
+      console.warn(
+        `[Extract] Page ${batch[0]?.pageNumber} failed extraction:`,
+        batchErr
+      );
+      await markBatchStatus(batch, pageMap, "extraction_failed", onProgress);
+    }
+  };
+
+  await pMap(packedTextBatches, (batch) => executeBatch(batch), {
+    concurrency: 6,
+  });
 
   return { batchFacts: allExtractedFacts, visionFactPageNumbers };
 }
