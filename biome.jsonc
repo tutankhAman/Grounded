@@ -24,6 +24,8 @@
       "performance": {
         "noBarrelFile": "off",
         "noNamespaceImport": "off",
+        // Load-bearing for sequential page streaming: O(1-page) memory requires
+        // awaiting page extraction, chunk persistence, and cleanup sequentially.
         "noAwaitInLoops": "off"
       },
       "style": {
@@ -32,6 +34,7 @@
         "useFilenamingConvention": "off"
       },
       "suspicious": {
+        // Permitted for pipeline progress logging and verification diagnostics
         "noConsole": "off"
       }
     }
