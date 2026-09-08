@@ -12,7 +12,11 @@ export const ExtractedFactSchema = z.object({
     .describe("ISO currency or symbol if applicable, or null"),
   entity: z.object({
     context: z
-      .union([z.string(), z.record(z.unknown()), z.array(z.unknown())])
+      .union([
+        z.string(),
+        z.record(z.string(), z.unknown()),
+        z.array(z.unknown()),
+      ])
       .transform((c) => (typeof c === "string" ? c : JSON.stringify(c)))
       .describe(
         "One sentence of surrounding context making the entity unambiguous"
@@ -29,14 +33,27 @@ export const ExtractedFactSchema = z.object({
     .string()
     .describe("snake_case identifier for the property/attribute"),
   qualifiers: z
-    .array(
-      z.object({
-        key: z.string(),
-        value: z.string(),
-      })
-    )
+    .union([
+      z.record(z.string(), z.unknown()),
+      z.array(z.object({ key: z.string(), value: z.unknown() })),
+    ])
     .nullish()
-    .describe("Any key-value qualifiers that modify the fact meaning, or null"),
+    .transform((val): Record<string, unknown> => {
+      if (!val) {
+        return {};
+      }
+      if (Array.isArray(val)) {
+        const rec: Record<string, unknown> = {};
+        for (const item of val) {
+          if (item && typeof item === "object" && "key" in item) {
+            rec[item.key] = item.value;
+          }
+        }
+        return rec;
+      }
+      return val;
+    })
+    .describe("Key-value qualifiers that modify the fact meaning"),
   rawValue: z
     .string()
     .describe("Verbatim representation as stated in the text"),
@@ -58,8 +75,22 @@ export const ExtractionResultSchema = z.object({
   facts: z.array(ExtractedFactSchema),
 });
 
+export const BatchExtractedFactSchema = ExtractedFactSchema.extend({
+  pageNumber: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .describe("1-based page number where this fact appears"),
+});
+
+export const BatchExtractionResultSchema = z.object({
+  facts: z.array(BatchExtractedFactSchema),
+});
+
 export type ExtractedFact = z.infer<typeof ExtractedFactSchema>;
 export type ExtractionResult = z.infer<typeof ExtractionResultSchema>;
+export type BatchExtractedFact = z.infer<typeof BatchExtractedFactSchema>;
+export type BatchExtractionResult = z.infer<typeof BatchExtractionResultSchema>;
 
 export const ReconciliationResultSchema = z.object({
   confidence: z.number().min(0).max(1),
