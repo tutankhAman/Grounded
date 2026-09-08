@@ -37,7 +37,7 @@ export const documentWorker = new Worker<ParseJob | ExtractJob>(
     return { success: true };
   },
   {
-    concurrency: 2,
+    concurrency: 3,
     connection,
   }
 );

@@ -4,12 +4,16 @@ import {
 } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import {
+  type BatchExtractedFact,
+  BatchExtractionResultSchema,
   EMBEDDING_DIM,
-  type ExtractedFact,
-  ExtractionResultSchema,
 } from "@grounded/db";
 import { embedMany, generateObject, generateText } from "ai";
-import { EXTRACTION_SYSTEM_PROMPT, parseFallbackOutput } from "./extractor";
+import { rateLimitedFetch } from "../lib/rate-limit";
+import {
+  EXTRACTION_SYSTEM_PROMPT,
+  parseFallbackBatchOutput,
+} from "./extractor";
 
 export class ExtractionFailedError extends Error {
   readonly rawOutput?: string;
@@ -24,56 +28,111 @@ export class ExtractionFailedError extends Error {
   }
 }
 
-export const getSambaNovaProvider = () => {
-  const apiKey = process.env.SAMBANOVA_API_KEY;
+/**
+ * Single gateway-routed OpenAI-compatible chat provider.
+ * Uses LLM_BASE_URL (defaults to Gemini OpenAI-compatible endpoint) and LLM_API_KEY.
+ * Falls back to GEMINI_API_KEY if LLM_API_KEY is not explicitly set.
+ */
+export const getChatProvider = () => {
+  const baseURL =
+    process.env.LLM_BASE_URL ||
+    "https://generativelanguage.googleapis.com/v1beta/openai/";
+  const apiKey = process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || "";
   if (!apiKey) {
-    throw new Error("SAMBANOVA_API_KEY is required for text fact extraction.");
+    throw new Error(
+      "Either LLM_API_KEY or GEMINI_API_KEY is required for LLM chat and extraction."
+    );
   }
   return createOpenAI({
     apiKey,
-    baseURL: process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1",
+    baseURL,
+    fetch: rateLimitedFetch,
   });
 };
 
-export const getGoogleProvider = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+/**
+ * Direct Google provider retained strictly as an env-switchable fallback (EMBED_DIRECT=1).
+ */
+export const getDirectGoogleProvider = () => {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.LLM_API_KEY;
   if (!apiKey) {
-    throw new Error(
-      "GEMINI_API_KEY is required for embeddings and vision fact extraction."
-    );
+    throw new Error("GEMINI_API_KEY is required for direct Google embedding.");
   }
-  return createGoogleGenerativeAI({ apiKey });
+  return createGoogleGenerativeAI({
+    apiKey,
+    fetch: rateLimitedFetch,
+  });
 };
 
-export interface ExtractTextOptions {
+export interface PageBatchItem {
+  pageNumber: number;
+  text: string;
+}
+
+export const formatBatchPrompt = (pages: PageBatchItem[]): string =>
+  pages.map((p) => `--- PAGE ${p.pageNumber} ---\n${p.text}`).join("\n\n");
+
+/**
+ * L2-normalize an embedding vector to unit length (||v|| = 1.0).
+ * Required because gemini-embedding-001 does not auto-normalize when truncated to 1536 dims.
+ */
+export const l2Normalize = (vector: number[]): number[] => {
+  let sumSq = 0;
+  for (const v of vector) {
+    sumSq += v * v;
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) {
+    return vector;
+  }
+  return vector.map((v) => v / norm);
+};
+
+export interface ExtractBatchOptions {
   forceFailure?: boolean;
   systemPrompt?: string;
 }
 
-export const extractTextChunk = async (
-  rawText: string,
-  options?: ExtractTextOptions
-): Promise<ExtractedFact[]> => {
+/**
+ * Extracts facts across a batch of pages using native structured output.
+ * Each fact carries its respective 1-based pageNumber.
+ */
+export const extractBatch = async (
+  pages: PageBatchItem[],
+  options?: ExtractBatchOptions
+): Promise<BatchExtractedFact[]> => {
   if (options?.forceFailure) {
-    throw new ExtractionFailedError(
-      "Forced extraction failure requested for testing",
-      { rawOutput: "ERROR" }
-    );
+    throw new ExtractionFailedError("Forced extraction failure for testing.");
+  }
+  if (pages.length === 0) {
+    return [];
   }
 
-  const sambanova = getSambaNovaProvider();
-  const modelName = process.env.SAMBANOVA_MODEL ?? "gpt-oss-120b";
-  const model = sambanova(modelName);
+  const provider = getChatProvider();
+  const modelName = process.env.TEXT_MODEL ?? "gemini-3.5-flash-lite";
+  const model = provider(modelName);
   const systemPrompt = options?.systemPrompt ?? EXTRACTION_SYSTEM_PROMPT;
+  const thinkingBudget = Number(process.env.THINKING_BUDGET ?? 0);
+
+  const promptText = `Extract all facts from the following document pages. Each fact MUST include the 1-based pageNumber corresponding to the page section header (e.g. --- PAGE X ---) where the fact is stated:\n\n${formatBatchPrompt(
+    pages
+  )}`;
 
   try {
     const result = await generateObject({
       maxRetries: 2,
-      mode: "json",
       model,
-      prompt: `Extract all facts from this document chunk:\n\n${rawText}`,
-      schema: ExtractionResultSchema,
-      system: `${systemPrompt}\nEnsure EVERY fact object includes: entity ({name, type, context}), predicate, value, rawValue, confidence, sourceQuote, factTypeDescription.`,
+      prompt: promptText,
+      // Best-effort thinking budget (proxies or non-Gemini gateways may strip it)
+      providerOptions: {
+        google: {
+          thinking: {
+            budgetTokens: thinkingBudget,
+          },
+        },
+      },
+      schema: BatchExtractionResultSchema,
+      system: systemPrompt,
       temperature: 0,
     });
     return result.object.facts;
@@ -82,17 +141,17 @@ export const extractTextChunk = async (
       const rawResult = await generateText({
         maxRetries: 2,
         model,
-        prompt: `Extract all facts from this document chunk:\n\n${rawText}`,
-        system: `${systemPrompt}\nReturn ONLY valid JSON matching {"facts": [...]} with no other markdown or explanation.`,
+        prompt: `${promptText}\n\nReturn ONLY a valid JSON object matching {"facts": [{"pageNumber": 1, ...}]}.`,
+        system: systemPrompt,
         temperature: 0,
       });
 
-      const fallback = parseFallbackOutput(rawResult.text);
-      if (fallback.ok) {
-        return fallback.facts;
+      const parsed = parseFallbackBatchOutput(rawResult.text);
+      if (parsed.ok) {
+        return parsed.facts;
       }
       throw new ExtractionFailedError(
-        `Fallback JSON parse failed: ${fallback.error}`,
+        `Failed to parse batch fallback output: ${parsed.error}`,
         { cause: schemaErr, rawOutput: rawResult.text }
       );
     } catch (fallbackErr: unknown) {
@@ -103,105 +162,168 @@ export const extractTextChunk = async (
         fallbackErr instanceof Error
           ? fallbackErr.message
           : String(fallbackErr);
-      throw new ExtractionFailedError(
-        `Text chunk extraction failed: ${message}`,
-        {
-          cause: fallbackErr,
-          rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
-        }
-      );
+      throw new ExtractionFailedError(`Batch extraction failed: ${message}`, {
+        cause: fallbackErr,
+      });
     }
   }
 };
 
-export const extractVisionPage = async (
+/**
+ * Single-chunk extraction wrapper preserving backward compatibility.
+ * Delegates to extractBatch for page 1.
+ */
+export const extractTextChunk = async (
+  rawText: string,
+  options?: ExtractBatchOptions
+): Promise<BatchExtractedFact[]> => {
+  const batch = await extractBatch([{ pageNumber: 1, text: rawText }], options);
+  return batch;
+};
+
+function normalizeVisionArgs(
+  imagesOrDataUrl: string[] | string,
+  pageNumbersOrHint?: number[] | string,
+  maybeHint?: string
+): { hint?: string; images: string[]; pageNumbers: number[] } {
+  if (typeof imagesOrDataUrl === "string") {
+    return {
+      hint:
+        typeof pageNumbersOrHint === "string" ? pageNumbersOrHint : maybeHint,
+      images: [imagesOrDataUrl],
+      pageNumbers: [1],
+    };
+  }
+  return {
+    hint: maybeHint,
+    images: imagesOrDataUrl,
+    pageNumbers: Array.isArray(pageNumbersOrHint) ? pageNumbersOrHint : [1],
+  };
+}
+
+type VisionContentPart =
+  | { data: string; mediaType: string; type: "file" }
+  | { text: string; type: "text" };
+
+async function handleVisionFallback(
+  model: Parameters<typeof generateText>[0]["model"],
+  contentParts: VisionContentPart[],
+  schemaErr: unknown
+): Promise<BatchExtractedFact[]> {
+  try {
+    const rawResult = await generateText({
+      maxRetries: 2,
+      messages: [
+        {
+          content: contentParts,
+          role: "user",
+        },
+      ],
+      model,
+      system: EXTRACTION_SYSTEM_PROMPT,
+      temperature: 0,
+    });
+
+    const fallback = parseFallbackBatchOutput(rawResult.text);
+    if (fallback.ok) {
+      return fallback.facts;
+    }
+    throw new ExtractionFailedError(
+      `Vision fallback JSON parse failed: ${fallback.error}`,
+      { cause: schemaErr, rawOutput: rawResult.text }
+    );
+  } catch (fallbackErr: unknown) {
+    if (fallbackErr instanceof ExtractionFailedError) {
+      throw fallbackErr;
+    }
+    const message =
+      fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+    throw new ExtractionFailedError(
+      `Vision batch extraction failed: ${message}`,
+      {
+        cause: fallbackErr,
+        rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
+      }
+    );
+  }
+}
+
+/**
+ * Multi-image or single-image vision extraction with ordering instructions.
+ */
+export function extractVisionPage(
   imageDataUrl: string,
   rawTextHint?: string
-): Promise<ExtractedFact[]> => {
-  const google = getGoogleProvider();
-  const visionModelName = process.env.VISION_MODEL ?? "gemini-3.5-flash-lite";
-  const model = google(visionModelName);
+): Promise<BatchExtractedFact[]>;
+export function extractVisionPage(
+  images: string[],
+  pageNumbers: number[],
+  hint?: string
+): Promise<BatchExtractedFact[]>;
+export async function extractVisionPage(
+  imagesOrDataUrl: string[] | string,
+  pageNumbersOrHint?: number[] | string,
+  maybeHint?: string
+): Promise<BatchExtractedFact[]> {
+  const { hint, images, pageNumbers } = normalizeVisionArgs(
+    imagesOrDataUrl,
+    pageNumbersOrHint,
+    maybeHint
+  );
 
-  const promptText = rawTextHint
-    ? `Extract all facts visible in this table or slide.\n\nContext text from page:\n${rawTextHint}`
-    : "Extract all facts visible in this table or slide.";
+  if (images.length === 0 || pageNumbers.length === 0) {
+    return [];
+  }
+
+  const provider = getChatProvider();
+  const visionModelName = process.env.VISION_MODEL ?? "gemini-3.5-flash-lite";
+  const model = provider(visionModelName);
+  const thinkingBudget = Number(process.env.THINKING_BUDGET ?? 0);
+
+  const orderingGuide = pageNumbers
+    .map((p, idx) => `Image ${idx + 1} corresponds to page ${p}`)
+    .join(", ");
+
+  const promptText = hint
+    ? `Extract all facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.\nContext text:\n${hint}`
+    : `Extract all facts visible in these pages/tables.\nImages provided: ${orderingGuide}.\nEvery extracted fact MUST include the correct pageNumber.`;
+
+  const contentParts: Array<
+    | { type: "file"; data: string; mediaType: string }
+    | { type: "text"; text: string }
+  > = images.map((imageDataUrl) => ({
+    data: imageDataUrl,
+    mediaType: "image/png",
+    type: "file" as const,
+  }));
+  contentParts.push({ text: promptText, type: "text" });
 
   try {
     const result = await generateObject({
       maxRetries: 2,
       messages: [
         {
-          content: [
-            {
-              data: imageDataUrl,
-              mediaType: "image/png",
-              type: "file",
-            },
-            {
-              text: promptText,
-              type: "text",
-            },
-          ],
+          content: contentParts,
           role: "user",
         },
       ],
       model,
-      schema: ExtractionResultSchema,
+      providerOptions: {
+        google: {
+          thinking: {
+            budgetTokens: thinkingBudget,
+          },
+        },
+      },
+      schema: BatchExtractionResultSchema,
       system: EXTRACTION_SYSTEM_PROMPT,
       temperature: 0,
     });
     return result.object.facts;
   } catch (schemaErr: unknown) {
-    try {
-      const rawResult = await generateText({
-        maxRetries: 2,
-        messages: [
-          {
-            content: [
-              {
-                data: imageDataUrl,
-                mediaType: "image/png",
-                type: "file",
-              },
-              {
-                text: `${promptText}\n\nReturn ONLY valid JSON matching {"facts": [...]} with no other text.`,
-                type: "text",
-              },
-            ],
-            role: "user",
-          },
-        ],
-        model,
-        system: EXTRACTION_SYSTEM_PROMPT,
-        temperature: 0,
-      });
-
-      const fallback = parseFallbackOutput(rawResult.text);
-      if (fallback.ok) {
-        return fallback.facts;
-      }
-      throw new ExtractionFailedError(
-        `Vision fallback JSON parse failed: ${fallback.error}`,
-        { cause: schemaErr, rawOutput: rawResult.text }
-      );
-    } catch (fallbackErr: unknown) {
-      if (fallbackErr instanceof ExtractionFailedError) {
-        throw fallbackErr;
-      }
-      const message =
-        fallbackErr instanceof Error
-          ? fallbackErr.message
-          : String(fallbackErr);
-      throw new ExtractionFailedError(
-        `Vision page extraction failed: ${message}`,
-        {
-          cause: fallbackErr,
-          rawOutput: schemaErr instanceof Error ? schemaErr.message : undefined,
-        }
-      );
-    }
+    return await handleVisionFallback(model, contentParts, schemaErr);
   }
-};
+}
 
 const embeddingCache = new Map<string, number[]>();
 const MAX_CACHE_SIZE = 5000;
@@ -262,30 +384,56 @@ const embedWithRetry = async (
 const fetchAndCacheMissing = async (
   missingValues: string[]
 ): Promise<number[][]> => {
-  const google = getGoogleProvider();
-  const modelName = process.env.EMBEDDING_MODEL ?? "gemini-embedding-2";
+  const modelName = process.env.EMBEDDING_MODEL ?? "gemini-embedding-001";
   const dim = Number(process.env.EMBEDDING_DIM ?? EMBEDDING_DIM);
+  const taskType = process.env.EMBEDDING_TASK_DOC ?? "RETRIEVAL_DOCUMENT";
   const BATCH_SIZE = 100;
   const fetched: number[][] = [];
 
+  const useDirect = process.env.EMBED_DIRECT === "1";
+
   for (let i = 0; i < missingValues.length; i += BATCH_SIZE) {
     const batch = missingValues.slice(i, i + BATCH_SIZE);
-    const embeddings = await embedWithRetry(
-      google.embedding(modelName),
-      {
-        google: {
-          outputDimensionality: dim,
-        } satisfies GoogleEmbeddingModelOptions,
-      },
-      batch
-    );
 
+    let rawEmbeddings: number[][];
+    if (useDirect) {
+      const google = getDirectGoogleProvider();
+      rawEmbeddings = await embedWithRetry(
+        google.embedding(modelName),
+        {
+          google: {
+            outputDimensionality: dim,
+            taskType: taskType as GoogleEmbeddingModelOptions["taskType"],
+          } satisfies GoogleEmbeddingModelOptions,
+        },
+        batch
+      );
+    } else {
+      const provider = getChatProvider();
+      rawEmbeddings = await embedWithRetry(
+        provider.embedding(modelName),
+        {
+          openai: {
+            dimensions: dim,
+            extraBody: {
+              dimensions: dim,
+              outputDimensionality: dim,
+              taskType,
+            },
+          },
+        },
+        batch
+      );
+    }
+
+    // L2-normalize every vector client-side
     for (let j = 0; j < batch.length; j++) {
       const val = batch[j];
-      const emb = embeddings[j];
+      const emb = rawEmbeddings[j];
       if (emb) {
-        setInEmbeddingCache(val, emb);
-        fetched.push(emb);
+        const normalized = l2Normalize(emb);
+        setInEmbeddingCache(val, normalized);
+        fetched.push(normalized);
       }
     }
   }

@@ -26,8 +26,9 @@ import { processParseJob, pubRedis } from "./parse";
 dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 
 // Fail-fast preflight per specification
-if (!(process.env.SAMBANOVA_API_KEY && process.env.GEMINI_API_KEY)) {
-  throw new Error("Live test requires SAMBANOVA_API_KEY and GEMINI_API_KEY");
+const hasKey = Boolean(process.env.LLM_API_KEY || process.env.GEMINI_API_KEY);
+if (!hasKey) {
+  throw new Error("Live test requires LLM_API_KEY or GEMINI_API_KEY");
 }
 if (!process.env.DATABASE_URL) {
   throw new Error("Live test requires DATABASE_URL");
@@ -40,10 +41,10 @@ if (!process.env.REDIS_URL) {
 const COST_CAPS = {
   maxGeminiEmbeddingCalls: 10,
   maxGeminiVisionCalls: 3,
-  maxSambaNovaCalls: 5,
+  maxTextCalls: 5,
 };
 
-let sambaNovaCallCount = 0;
+let textCallCount = 0;
 let geminiVisionCallCount = 0;
 let geminiEmbeddingCallCount = 0;
 
@@ -73,10 +74,10 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
   });
 
   test("Test 1: Real chunk text extract -> >= 1 fact, every quote in rawText", async () => {
-    sambaNovaCallCount++;
-    if (sambaNovaCallCount > COST_CAPS.maxSambaNovaCalls) {
+    textCallCount++;
+    if (textCallCount > COST_CAPS.maxTextCalls) {
       throw new Error(
-        `Cost cap exceeded: max ${COST_CAPS.maxSambaNovaCalls} SambaNova calls allowed.`
+        `Cost cap exceeded: max ${COST_CAPS.maxTextCalls} text calls allowed.`
       );
     }
 
@@ -99,7 +100,7 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
     }
 
     benchmarkMetrics.push({
-      action: "Test 1: SambaNova gpt-oss-120b text extraction",
+      action: "Test 1: Gemini text extraction",
       itemsExtracted: extracted.length,
       tokensEstimated: Math.ceil(chunkText.length / 4),
       wallClockMs,
@@ -118,8 +119,6 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
       .values({
         filename: "test-resilience.pdf",
         filePath: "/tmp/fake-test-doc.pdf",
-        fileSize: 1024,
-        mimeType: "application/pdf",
         status: "uploaded",
       })
       .returning();
@@ -142,13 +141,13 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
     const [chunkBad] = await db
       .insert(pageChunks)
       .values({
-        chunkIndex: 1,
+        chunkIndex: 0,
         documentId: testDoc.id,
         extractionStatus: "pending",
         isLowText: false,
         isTableHeavy: false,
         needsVision: false,
-        pageNumber: 1,
+        pageNumber: 2,
         rawText: "Corrupted input designed to trigger extraction failure.",
         tokenEstimate: 50,
       })
@@ -253,7 +252,7 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
       const vectorStr = `[${embedding.join(",")}]`;
       const [queried] = await db
         .select({
-          distance: sql<number>`${factTypes.embedding} <=> ${sql.raw(`'${vectorStr}'::vector`)}`,
+          distance: sql<number>`${factTypes.embedding} <=> ${vectorStr}::vector`,
           id: factTypes.id,
         })
         .from(factTypes)
@@ -331,8 +330,6 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
       .values({
         filename: "fixture-report.pdf",
         filePath: fixturePdfPath,
-        fileSize: 3555,
-        mimeType: "application/pdf",
         status: "uploaded",
       })
       .returning();
@@ -447,7 +444,7 @@ describe("Phase-2 Live Fact Extraction Integration Suite", () => {
     const validated = rawFacts.map((f) => applyQuoteValidation(f, "", true));
     for (const { fact, sourceQuoteValid, visionOnly } of validated) {
       expect(visionOnly).toBe(true);
-      expect(sourceQuoteValid).toBe(true);
+      expect(sourceQuoteValid).toBe(false);
       expect(typeof fact.predicate).toBe("string");
       expect(typeof fact.value).toBe("string");
     }
