@@ -20,4 +20,5 @@ export * from "./extraction-schema";
 export * from "./jobs";
 export * from "./progress";
 export * from "./queue";
+export * from "./redis-ready";
 export * from "./schema";

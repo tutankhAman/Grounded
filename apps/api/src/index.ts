@@ -21,6 +21,7 @@ import { closeQueue } from "./lib/queue";
 import { documentRoutes } from "./routes/documents";
 import { entityRoutes } from "./routes/entities";
 import { factRoutes } from "./routes/facts";
+import { relationshipRoutes } from "./routes/relationships";
 
 dotenv.config({ path: resolve(import.meta.dirname, "../../../.env") });
 
@@ -83,6 +84,7 @@ export const app = new Elysia()
   .use(documentRoutes)
   .use(factRoutes)
   .use(entityRoutes)
+  .use(relationshipRoutes)
   .ws("/documents/:id/status", {
     async close(ws) {
       const documentId = ws.data.params?.id;
@@ -101,7 +103,18 @@ export const app = new Elysia()
 
       // Subscribe to Redis pubsub BEFORE querying the DB snapshot to prevent
       // a race condition where a status event published during the query is dropped.
-      await subscribeToDocument(documentId, ws);
+      // A failed subscription is surfaced (never ghosted): the socket is only
+      // useful with live delivery, so close it with an actionable code.
+      const subscribed = await subscribeToDocument(documentId, ws);
+      if (!subscribed) {
+        ws.send(
+          JSON.stringify({
+            error: "Live updates unavailable — reconnect to retry",
+          })
+        );
+        ws.close(4413, "Subscription unavailable");
+        return;
+      }
 
       const [doc] = await db
         .select({

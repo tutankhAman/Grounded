@@ -45,11 +45,25 @@ function parseCloseEvent(code: number): {
   if (code === 4404) {
     return { error: "Document not found", isTerminal: false };
   }
+  if (code === 4413) {
+    return {
+      error: "Live updates unavailable. Click to reconnect.",
+      isTerminal: false,
+    };
+  }
   if (code === 1000) {
     return { error: null, isTerminal: true };
   }
   return { error: "Connection lost. Click to reconnect.", isTerminal: false };
 }
+
+const OPEN_TIMEOUT_MS = 8000;
+
+const devLog = (...args: unknown[]): void => {
+  if (import.meta.env.DEV) {
+    console.debug("[doc-status]", ...args);
+  }
+};
 
 export function useDocumentStatus(
   documentId: string | null | undefined,
@@ -152,16 +166,38 @@ export function useDocumentStatus(
     const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:3000";
     const wsBaseUrl = apiUrl.replace(HTTP_PREFIX_REGEX, "ws");
     const wsUrl = `${wsBaseUrl}/documents/${documentId}/status`;
+    devLog("connecting", { documentId, wsUrl });
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
+    // If the handshake never completes (server accepted TCP but stalls),
+    // fail visibly instead of hanging forever with no error shown.
+    const openTimer = setTimeout(() => {
+      if (wsRef.current === ws) {
+        devLog("open timeout, closing", { documentId });
+        try {
+          ws.close();
+        } catch {
+          // Already closed — onclose will handle state.
+        }
+      }
+    }, OPEN_TIMEOUT_MS);
+
     ws.onopen = () => {
+      clearTimeout(openTimer);
+      devLog("open", { documentId });
       setIsConnected(true);
       setError(null);
     };
 
     ws.onmessage = handleMessage;
+
+    ws.onerror = () => {
+      // onclose always follows with the code; log here so handshake-level
+      // failures are distinguishable from clean closes in devtools.
+      devLog("error", { documentId });
+    };
 
     // NOTE: onclose fires for our own cleanup closes too (effect re-run on
     // new initialStatus, unmount, reconnect). A closing socket that is no
@@ -175,6 +211,8 @@ export function useDocumentStatus(
         return;
       }
       wsRef.current = null;
+      clearTimeout(openTimer);
+      devLog("close", { code: event.code, documentId, reason: event.reason });
       setIsConnected(false);
       setIsClosed(true);
       setEtaBase(null);
