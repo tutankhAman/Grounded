@@ -100,6 +100,7 @@ export const ReconciliationResultSchema = z.object({
   confidence: z.number().min(0).max(1),
   explanation: z
     .string()
+    .min(1)
     .describe(
       "Plain-language natural reasoning trace explaining the relationship"
     ),
