@@ -197,8 +197,15 @@ const getFormCounts = (members: RawEntityMention[]): FormCountEntry[] => {
     if (b.count !== a.count) {
       return b.count - a.count;
     }
-    if (b.original.length !== a.original.length) {
-      return b.original.length - a.original.length;
+    const baseA = a.original.replace(LEADING_THE_REGEX, "").trim();
+    const baseB = b.original.replace(LEADING_THE_REGEX, "").trim();
+    if (baseB.length !== baseA.length) {
+      return baseB.length - baseA.length;
+    }
+    const aHasThe = LEADING_THE_REGEX.test(a.original);
+    const bHasThe = LEADING_THE_REGEX.test(b.original);
+    if (aHasThe !== bHasThe) {
+      return aHasThe ? 1 : -1;
     }
     return a.original.localeCompare(b.original);
   });
