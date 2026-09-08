@@ -31,20 +31,22 @@ describe.skipIf(!dbAvailable)("POST /documents API tests", () => {
 
   afterAll(async () => {
     // Clean up created test documents from db and disk
-    for (const id of createdDocIds) {
-      const [doc] = await db
-        .select()
-        .from(documents)
-        .where(eq(documents.id, id));
-      if (doc?.filePath && existsSync(doc.filePath)) {
-        try {
-          unlinkSync(doc.filePath);
-        } catch {
-          // Ignored cleanup error
+    await Promise.all(
+      createdDocIds.map(async (id) => {
+        const [doc] = await db
+          .select()
+          .from(documents)
+          .where(eq(documents.id, id));
+        if (doc?.filePath && existsSync(doc.filePath)) {
+          try {
+            unlinkSync(doc.filePath);
+          } catch {
+            // Ignored cleanup error
+          }
         }
-      }
-      await db.delete(documents).where(eq(documents.id, id));
-    }
+        await db.delete(documents).where(eq(documents.id, id));
+      })
+    );
   });
 
   test("rejects non-PDF files with 400 Bad Request", async () => {

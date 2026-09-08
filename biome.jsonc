@@ -23,10 +23,7 @@
     "rules": {
       "performance": {
         "noBarrelFile": "off",
-        "noNamespaceImport": "off",
-        // Load-bearing for sequential page streaming: O(1-page) memory requires
-        // awaiting page extraction, chunk persistence, and cleanup sequentially.
-        "noAwaitInLoops": "off"
+        "noNamespaceImport": "off"
       },
       "style": {
         "noIncrementDecrement": "off",
@@ -38,5 +35,22 @@
         "noConsole": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "apps/worker/src/pipeline/parser.ts",
+        "apps/worker/src/consumers/parse.ts"
+      ],
+      "linter": {
+        "rules": {
+          "performance": {
+            // Load-bearing for sequential page streaming: O(1-page) memory requires
+            // awaiting page extraction, chunk persistence, and cleanup sequentially.
+            "noAwaitInLoops": "off"
+          }
+        }
+      }
+    }
+  ]
 }
