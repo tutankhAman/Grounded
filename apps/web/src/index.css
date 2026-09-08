@@ -33,6 +33,7 @@
   --font-sans:
     "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
+  --font-brand: "Josefin Sans", "Inter", sans-serif;
   color-scheme: light;
 }
 
@@ -186,6 +187,44 @@ pre,
   }
   50% {
     opacity: 0.6;
+  }
+}
+
+/* Spinner for lucide Loader2 / RefreshCw icons (Tailwind-style class name,
+ * defined locally since this project uses plain CSS, not Tailwind). */
+.animate-spin {
+  animation: spin-rotate 1s linear infinite;
+}
+
+@keyframes spin-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Animated ellipsis for in-progress pipeline stages */
+.loading-dots {
+  display: inline-block;
+}
+
+.loading-dots::after {
+  content: "";
+  animation: ellipsis-steps 1.2s infinite;
+}
+
+@keyframes ellipsis-steps {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75%,
+  100% {
+    content: "...";
   }
 }
 

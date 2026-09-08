@@ -44,23 +44,21 @@ export function Sidebar() {
             gap: 10,
           }}
         >
-          <span
-            style={{
-              background: "var(--accent-olive)",
-              borderRadius: 6,
-              display: "inline-block",
-              flexShrink: 0,
-              height: 14,
-              width: 14,
-            }}
+          <img
+            alt="Grounded logo"
+            height={32}
+            src="/grounded.svg"
+            style={{ display: "block", flexShrink: 0 }}
+            width={32}
           />
           <h1
             className="brand-title"
             style={{
               color: "var(--text-main)",
-              fontSize: 15,
-              fontWeight: 700,
-              letterSpacing: "-0.01em",
+              fontFamily: "var(--font-brand)",
+              fontSize: 21,
+              fontWeight: 600,
+              letterSpacing: "0.01em",
               lineHeight: 1.2,
             }}
           >
@@ -74,7 +72,7 @@ export function Sidebar() {
             fontSize: 11,
             fontWeight: 500,
             letterSpacing: "0.06em",
-            paddingLeft: 24,
+            paddingLeft: 40,
             textTransform: "uppercase",
           }}
         >

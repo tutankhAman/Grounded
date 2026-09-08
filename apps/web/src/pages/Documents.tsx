@@ -6,9 +6,10 @@ import {
   FileText,
   RefreshCw,
 } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { UploadButton } from "../components/UploadButton";
+import { UploadPipeline } from "../components/UploadPipeline";
 import { useDocumentStatus } from "../hooks/useDocumentStatus";
 import { formatEta } from "../lib/format";
 import { fetchDocuments, queryKeys } from "../lib/query";
@@ -261,9 +262,19 @@ function DocumentRow({
   );
 }
 
+interface ActiveUpload {
+  filename: string;
+  id: string;
+  status: string;
+}
+
+const isLiveStatus = (status: string): boolean =>
+  status !== "done" && status !== "failed";
+
 export function DocumentsPage() {
   const [searchParams] = useSearchParams();
   const highlightedId = searchParams.get("highlight");
+  const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([]);
 
   const {
     data: documentsList = [],
@@ -273,11 +284,71 @@ export function DocumentsPage() {
   } = useQuery({
     queryFn: fetchDocuments,
     queryKey: queryKeys.documents(),
+    // Keep statuses fresh while anything is still processing, so docs
+    // uploaded from anywhere (sidebar, another tab) flow through the
+    // pipeline cards without a manual refresh.
+    refetchInterval: (query) => {
+      const docs = (query.state.data ?? []) as DocumentItem[];
+      return docs.some((doc) => isLiveStatus(doc.status)) ? 5000 : false;
+    },
   });
+
+  // Seed the pipeline from server state: any non-terminal document belongs
+  // in the live pipeline cards no matter where the upload originated.
+  // Terminal docs are left alone so finished cards keep their success
+  // linger (done) or manual dismiss (failed) behavior.
+  useEffect(() => {
+    const docs = (documentsList ?? []) as DocumentItem[];
+    setActiveUploads((prev) => {
+      const missing = docs.filter(
+        (doc) =>
+          isLiveStatus(doc.status) && !prev.some((item) => item.id === doc.id)
+      );
+      if (missing.length === 0) {
+        return prev;
+      }
+      return [
+        ...prev,
+        ...missing.map((doc) => ({
+          filename: doc.filename,
+          id: doc.id,
+          status: doc.status,
+        })),
+      ];
+    });
+  }, [documentsList]);
 
   const handleRefresh = useCallback(() => {
     refetch();
   }, [refetch]);
+
+  const handleUploaded = useCallback(
+    (doc: { filename: string; id: string; status: string }) => {
+      setActiveUploads((prev) =>
+        prev.some((item) => item.id === doc.id) ? prev : [...prev, doc]
+      );
+    },
+    []
+  );
+
+  const handleDismiss = useCallback((id: string) => {
+    setActiveUploads((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  // Prefer fresh server data for tracked cards when available.
+  const docsById = new Map(
+    ((documentsList ?? []) as DocumentItem[]).map((doc) => [doc.id, doc])
+  );
+  const activePipelines = activeUploads.map((item) => {
+    const fresh = docsById.get(item.id);
+    return fresh
+      ? { filename: fresh.filename, id: fresh.id, status: fresh.status }
+      : item;
+  });
+
+  const processedDocs = (documentsList as DocumentItem[]).filter(
+    (doc) => !activeUploads.some((item) => item.id === doc.id)
+  );
 
   return (
     <div
@@ -335,8 +406,30 @@ export function DocumentsPage() {
             <RefreshCw size={13} />
             <span>Refresh</span>
           </button>
-          <UploadButton variant="header" />
         </div>
+      </div>
+
+      {/* Upload + live pipeline */}
+      <UploadPipeline
+        active={activePipelines}
+        onDismiss={handleDismiss}
+        onUploaded={handleUploaded}
+      />
+
+      {/* Previously processed docs */}
+      <div
+        style={{
+          alignItems: "center",
+          display: "flex",
+          justifyContent: "space-between",
+          marginBottom: 14,
+        }}
+      >
+        <h2 style={{ fontSize: 16, fontWeight: 700 }}>Processed documents</h2>
+        <span style={{ color: "var(--text-dim)", fontSize: 12 }}>
+          {processedDocs.length}{" "}
+          {processedDocs.length === 1 ? "document" : "documents"}
+        </span>
       </div>
 
       {/* List */}
@@ -362,7 +455,7 @@ export function DocumentsPage() {
         >
           Failed to load documents: {(error as Error).message}
         </div>
-      ) : documentsList.length === 0 ? (
+      ) : processedDocs.length === 0 ? (
         <div
           style={{
             alignItems: "center",
@@ -409,7 +502,7 @@ export function DocumentsPage() {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {documentsList.map((doc: DocumentItem) => (
+          {processedDocs.map((doc: DocumentItem) => (
             <DocumentRow
               doc={doc}
               isHighlighted={highlightedId === doc.id}
