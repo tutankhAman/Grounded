@@ -76,22 +76,59 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
         return { error: "Failed to write uploaded file to disk." };
       }
 
-      // 5. Insert document record
-      const [doc] = await db
-        .insert(documents)
-        .values({
-          filename: sanitizedName,
-          filePath: targetPath,
-          status: "pending",
-          uploadedAt: new Date(),
-        })
-        .returning();
+      // 5. Insert document record with cleanup on failure
+      let doc: typeof documents.$inferSelect;
+      try {
+        const [inserted] = await db
+          .insert(documents)
+          .values({
+            filename: sanitizedName,
+            filePath: targetPath,
+            status: "pending",
+            uploadedAt: new Date(),
+          })
+          .returning();
 
-      // 6. Enqueue parse job (fire-and-forget, never block response)
-      await addParseJob({
-        documentId: doc.id,
-        filePath: targetPath,
-      });
+        if (!inserted) {
+          throw new Error("Failed to insert document record");
+        }
+        doc = inserted;
+      } catch {
+        try {
+          await unlink(targetPath);
+        } catch {
+          // ignore cleanup failure
+        }
+        set.status = 500;
+        return { error: "Failed to create document record in database." };
+      }
+
+      // 6. Enqueue parse job (catch error, mark document failed, and cleanup file)
+      try {
+        await addParseJob({
+          documentId: doc.id,
+          filePath: targetPath,
+        });
+      } catch (enqueueErr) {
+        try {
+          await unlink(targetPath);
+        } catch {
+          // ignore cleanup failure
+        }
+        await db
+          .update(documents)
+          .set({
+            errorMessage:
+              enqueueErr instanceof Error
+                ? enqueueErr.message
+                : "Failed to enqueue parse job",
+            status: "failed",
+          })
+          .where(eq(documents.id, doc.id));
+
+        set.status = 500;
+        return { error: "Failed to enqueue document for processing." };
+      }
 
       set.status = 201;
       return {
@@ -114,7 +151,6 @@ export const documentRoutes = new Elysia({ prefix: "/documents" })
         pageCount: documents.pageCount,
         status: documents.status,
         uploadedAt: documents.uploadedAt,
-        processedAt: documents.processedAt,
         errorMessage: documents.errorMessage,
       })
       .from(documents)

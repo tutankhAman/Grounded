@@ -76,7 +76,13 @@ export const app = new Elysia()
   );
 
 if (import.meta.main) {
-  app.listen(port);
+  const maxUploadMb = Number(process.env.MAX_UPLOAD_MB) || 100;
+  const maxRequestBodySize = maxUploadMb * 1024 * 1024;
+
+  app.listen({
+    maxRequestBodySize,
+    port,
+  });
   console.log(
     `🦊 Elysia API is running at http://${app.server?.hostname}:${app.server?.port}`
   );

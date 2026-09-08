@@ -9,6 +9,7 @@ dotenv.config({ path: resolve(import.meta.dirname, "../../../../.env") });
 const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
 
 export const queueConnection = new Redis(redisUrl, {
+  enableOfflineQueue: false,
   lazyConnect: true,
   maxRetriesPerRequest: null,
 });
